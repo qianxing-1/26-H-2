@@ -1,7 +1,7 @@
 #include "stm32f10x.h"                  // Device header
 #include "Delay.h"
 
-uint8_t Key_Num;
+static volatile uint8_t Key_Num;
 
 void Key_Init(void)
 {
@@ -18,13 +18,12 @@ void Key_Init(void)
 uint8_t Key_GetNum(void)
 {
 	uint8_t Temp;
-	if (Key_Num)
-	{
-		Temp = Key_Num;
-		Key_Num = 0;
-		return Temp;
-	}
-	return 0;
+
+	__disable_irq();
+	Temp = Key_Num;
+	Key_Num = 0;
+	__enable_irq();
+	return Temp;
 }
 
 uint8_t Key_GetState(void)
@@ -42,14 +41,25 @@ uint8_t Key_GetState(void)
 
 void Key_Tick(void)
 {
-	static uint8_t CurrState, PrevState;
-		
-	PrevState = CurrState;
-	CurrState = Key_GetState();
-	
-	if (CurrState == 0 && PrevState != 0)
+	static uint8_t RawState = 0;
+	static uint8_t StableState = 0;
+	static uint8_t StableCount = 0;
+	uint8_t NewState = Key_GetState();
+
+	if (NewState != RawState)
 	{
-		Key_Num = PrevState;
+		RawState = NewState;
+		StableCount = 0;
 	}
-	
+	else if (StableCount < 20)
+	{
+		StableCount++;
+	}
+
+	if (StableCount >= 20 && StableState != RawState)
+	{
+		if (StableState != 0 && RawState == 0)
+			Key_Num = StableState;
+		StableState = RawState;
+	}
 }

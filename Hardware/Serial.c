@@ -112,11 +112,16 @@ void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
     do
     {
         before = Serial_RxFrameCount;
+        if (before & 1U)
+        {
+            after = before + 1U;
+            continue;
+        }
         *target_x = x;
         *target_y = y;
         *last_rx_ms = Serial_LastRxMs;
         after = Serial_RxFrameCount;
-    } while (before != after);
+    } while (before != after || (after & 1U));
 
     *frame_id = after;
 }
@@ -124,75 +129,58 @@ void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
 void USART2_IRQHandler(void)
 {
     uint8_t data;
-    static uint8_t rx_count = 0;
-    static uint8_t rx_buffer[7] = {0};
-    static uint8_t rx_state = 0;
+    static uint16_t rx_value = 0;
+    static uint8_t rx_digits = 0;
+    static uint8_t rx_invalid = 0;
 
     if (USART_GetITStatus(USART2, USART_IT_RXNE) == RESET)
         return;
 
     data = (uint8_t)USART_ReceiveData(USART2);
 
-    if (rx_state == 0)
+    if (data >= '0' && data <= '9')
     {
-        if (data == 0x2C)
+        uint8_t digit = data - '0';
+
+        if (rx_digits < 5 &&
+            (rx_value < 6553U ||
+             (rx_value == 6553U && digit <= 5U)))
         {
-            rx_buffer[0] = data;
-            rx_count = 1;
-            rx_state = 1;
-        }
-    }
-    else if (rx_state == 1)
-    {
-        if (data == 0x12)
-        {
-            rx_buffer[1] = data;
-            rx_count = 2;
-            rx_state = 2;
-        }
-        else if (data == 0x2C)
-        {
-            rx_buffer[0] = data;
-            rx_count = 1;
+            rx_value = (uint16_t)(rx_value * 10U + digit);
+            rx_digits++;
         }
         else
         {
-            rx_count = 0;
-            rx_state = 0;
+            rx_invalid = 1;
         }
+    }
+    else if (data == '\n' || data == '\r')
+    {
+        if (rx_digits > 0)
+        {
+            uint16_t x_raw = rx_invalid ? 640U : rx_value;
+
+            Serial_RxFrameCount++; /* Odd: a coordinate update is in progress. */
+            x = x_raw;
+            y = 0;
+            Gimbal_Target_Offset_X =
+                (x_raw > 0U && x_raw < 640U) ?
+                ((int16_t)x_raw - 320) : 0;
+            Serial_LastRxMs = SystemTickMs;
+            Serial_RxFrameCount++; /* Even: the complete coordinate is readable. */
+            Serial_RxData = x_raw;
+            Serial_RxFlag = 1;
+        }
+
+        rx_value = 0;
+        rx_digits = 0;
+        rx_invalid = 0;
     }
     else
     {
-        if (rx_count < 7)
-            rx_buffer[rx_count++] = data;
-
-        if (rx_count == 7)
-        {
-            if (rx_buffer[6] == 0x5B)
-            {
-                uint16_t x_raw = ((uint16_t)rx_buffer[2] << 8) | rx_buffer[3];
-                uint16_t y_raw = ((uint16_t)rx_buffer[4] << 8) | rx_buffer[5];
-
-                x = x_raw;
-                y = y_raw;
-                Gimbal_Target_Offset_X =
-                    (x_raw != 0) ? ((int16_t)x_raw - 320) : 0;
-                Serial_LastRxMs = SystemTickMs;
-                Serial_RxFrameCount++;
-                Serial_RxFlag = 1;
-            }
-
-            if (data == 0x2C)
-            {
-                rx_buffer[0] = data;
-                rx_count = 1;
-                rx_state = 1;
-            }
-            else
-            {
-                rx_count = 0;
-                rx_state = 0;
-            }
-        }
+        /* Discard a malformed line and wait for its terminator. */
+        rx_value = 0;
+        rx_digits = 0;
+        rx_invalid = 1;
     }
 }

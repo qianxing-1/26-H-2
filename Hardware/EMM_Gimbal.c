@@ -1,10 +1,32 @@
 #include "step_pwm.h"
 #include "EMM_Gimbal.h"
-#include "Delay.h"
 
-#define TRACK_MIN_SPEED       16.0f
-#define TRACK_MAX_SPEED       600.0f
-#define TRACK_SPEED_RAMP      80.0f
+/* Motor tuning: one control tick is normally 5 ms. */
+#define TRACK_MIN_SPEED_HZ          16.0f
+#define TRACK_START_SPEED_HZ       100.0f
+#define TRACK_MAX_SPEED_HZ        1500.0f
+#define TRACK_ACCEL_HZ_PER_S     60000.0f
+#define TRACK_DECEL_HZ_PER_S    120000.0f
+
+/* Relative pulse limit from the level power-up position; tune to the linkage. */
+#define TRACK_POSITION_LIMIT      3000.0f
+
+#define MOTOR_DIR_CW_UP             0
+#define MOTOR_DIR_CCW_DOWN          1
+
+static float AbsFloat(float value)
+{
+    return (value >= 0.0f) ? value : -value;
+}
+
+static float ClampFloat(float value, float low, float high)
+{
+    if (value < low)
+        return low;
+    if (value > high)
+        return high;
+    return value;
+}
 
 void EMM_Motor_Init(EMM_Motor *motor)
 {
@@ -20,9 +42,11 @@ void EMM_Motor_Init(EMM_Motor *motor)
     gpio.GPIO_Pin = motor->ENA_Pin;
     GPIO_Init(motor->ENA_Port, &gpio);
 
-    motor->Direction = 0;
-    motor->Step_Frequency = 0;
-    EMM_Set_Direction(motor, 0);
+    motor->Direction = MOTOR_DIR_CW_UP;
+    motor->Step_Frequency = 0.0f;
+    motor->Signed_Frequency = 0.0f;
+    motor->Position_Estimate = 0.0f;
+    EMM_Set_Direction(motor, MOTOR_DIR_CW_UP);
     EMM_Disable(motor);
 }
 
@@ -33,100 +57,186 @@ void EMM_Enable(EMM_Motor *motor)
 
 void EMM_Disable(EMM_Motor *motor)
 {
+    STEP_PWM_SetFreq(0);
+    motor->Step_Frequency = 0.0f;
+    motor->Signed_Frequency = 0.0f;
     GPIO_SetBits(motor->ENA_Port, motor->ENA_Pin);
 }
 
-/* Existing hardware convention: 1 turns left and 0 turns right. */
+void EMM_Hold(EMM_Motor *motor)
+{
+    STEP_PWM_SetFreq(0);
+    motor->Step_Frequency = 0.0f;
+    motor->Signed_Frequency = 0.0f;
+    EMM_Enable(motor);
+}
+
 void EMM_Set_Direction(EMM_Motor *motor, uint8_t dir)
 {
     motor->Direction = dir;
-    if (dir)
+    if (dir == MOTOR_DIR_CCW_DOWN)
         GPIO_ResetBits(motor->DIR_Port, motor->DIR_Pin);
     else
         GPIO_SetBits(motor->DIR_Port, motor->DIR_Pin);
 }
 
+void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
+{
+    float current;
+    float target;
+    float next;
+    float accel_step;
+    float decel_step;
+    uint8_t desired_direction;
+
+    if (dt_s <= 0.0f || dt_s > 0.1f)
+        dt_s = 0.005f;
+
+    /* Count commanded pulses so a lost/stuck ball cannot drive the slider forever. */
+    motor->Position_Estimate += motor->Signed_Frequency * dt_s;
+    motor->Position_Estimate = ClampFloat(motor->Position_Estimate,
+                                           -TRACK_POSITION_LIMIT,
+                                           TRACK_POSITION_LIMIT);
+
+    target = ClampFloat(signed_frequency,
+                        -TRACK_MAX_SPEED_HZ, TRACK_MAX_SPEED_HZ);
+
+    if ((motor->Position_Estimate >= TRACK_POSITION_LIMIT && target > 0.0f) ||
+        (motor->Position_Estimate <= -TRACK_POSITION_LIMIT && target < 0.0f))
+    {
+        target = 0.0f;
+    }
+
+    if (AbsFloat(target) < TRACK_MIN_SPEED_HZ)
+        target = 0.0f;
+
+    current = motor->Signed_Frequency;
+    accel_step = TRACK_ACCEL_HZ_PER_S * dt_s;
+    decel_step = TRACK_DECEL_HZ_PER_S * dt_s;
+
+    /* Hard-stop STEP and change DIR; the next 5 ms tick restarts the pulses. */
+    if (current != 0.0f && target != 0.0f &&
+        ((current > 0.0f) != (target > 0.0f)))
+    {
+        EMM_Hold(motor);
+        desired_direction = (target > 0.0f) ?
+                            MOTOR_DIR_CW_UP : MOTOR_DIR_CCW_DOWN;
+        EMM_Set_Direction(motor, desired_direction);
+        return;
+    }
+
+    if (target == 0.0f)
+    {
+        if (AbsFloat(current) <= decel_step)
+        {
+            EMM_Hold(motor);
+        }
+        else
+        {
+            next = (current > 0.0f) ?
+                   (current - decel_step) : (current + decel_step);
+            motor->Signed_Frequency = next;
+            motor->Step_Frequency = AbsFloat(next);
+            STEP_PWM_SetFreq((uint32_t)motor->Step_Frequency);
+        }
+        return;
+    }
+
+    desired_direction = (target > 0.0f) ?
+                        MOTOR_DIR_CW_UP : MOTOR_DIR_CCW_DOWN;
+    if (current == 0.0f && desired_direction != motor->Direction)
+    {
+        EMM_Set_Direction(motor, desired_direction);
+        return; /* The next 5 ms tick supplies ample DIR setup time. */
+    }
+
+    if (current == 0.0f)
+    {
+        float start_speed = AbsFloat(target);
+
+        if (start_speed > TRACK_START_SPEED_HZ)
+            start_speed = TRACK_START_SPEED_HZ;
+        if (start_speed < TRACK_MIN_SPEED_HZ)
+            start_speed = TRACK_MIN_SPEED_HZ;
+        next = (target > 0.0f) ? start_speed : -start_speed;
+    }
+    else if (AbsFloat(target) > AbsFloat(current))
+    {
+        float delta = target - current;
+
+        if (delta > accel_step)
+            delta = accel_step;
+        if (delta < -accel_step)
+            delta = -accel_step;
+        next = current + delta;
+    }
+    else
+    {
+        float delta = target - current;
+
+        if (delta > decel_step)
+            delta = decel_step;
+        if (delta < -decel_step)
+            delta = -decel_step;
+        next = current + delta;
+    }
+
+    if (AbsFloat(next) < TRACK_MIN_SPEED_HZ)
+    {
+        EMM_Hold(motor);
+        return;
+    }
+
+    EMM_Enable(motor);
+    motor->Signed_Frequency = next;
+    motor->Step_Frequency = AbsFloat(next);
+    STEP_PWM_SetFreq((uint32_t)motor->Step_Frequency);
+}
+
 void PID_Init(PID_Controller *pid, float kp, float ki, float kd,
-              float max, float min)
+              float integral_limit, float max, float min)
 {
     pid->Kp = kp;
     pid->Ki = ki;
     pid->Kd = kd;
-    pid->Integral = 0;
-    pid->Last_Error = 0;
+    pid->Integral_Limit = integral_limit;
     pid->Max_Output = max;
     pid->Min_Output = min;
+    PID_Reset(pid);
 }
 
-float PID_Calculate(PID_Controller *pid, float error)
+void PID_Reset(PID_Controller *pid)
 {
+    pid->Integral = 0.0f;
+    pid->Last_Error = 0.0f;
+}
+
+float PID_Calculate(PID_Controller *pid, float error,
+                    float error_velocity, float dt_s)
+{
+    float candidate_integral;
     float output;
 
-    pid->Integral += error;
-    if (pid->Integral > 10000)
-        pid->Integral = 10000;
-    if (pid->Integral < -10000)
-        pid->Integral = -10000;
+    if (dt_s <= 0.0f || dt_s > 0.25f)
+        dt_s = 0.01f;
 
-    output = pid->Kp * error
-           + pid->Ki * pid->Integral
-           + pid->Kd * (error - pid->Last_Error);
-    pid->Last_Error = error;
+    candidate_integral = pid->Integral + error * dt_s;
+    candidate_integral = ClampFloat(candidate_integral,
+                                    -pid->Integral_Limit,
+                                    pid->Integral_Limit);
 
-    if (output > pid->Max_Output)
-        output = pid->Max_Output;
-    if (output < pid->Min_Output)
-        output = pid->Min_Output;
-    return output;
-}
+    output = pid->Kp * error +
+             pid->Ki * candidate_integral +
+             pid->Kd * error_velocity;
 
-void EMM_Visual_Control(EMM_Motor *motor, PID_Controller *pid,
-                        float image_error)
-{
-    float speed;
-    float target_speed;
-    uint8_t desired_direction;
-
-    target_speed = PID_Calculate(pid, image_error);
-    speed = (target_speed >= 0.0f) ? target_speed : -target_speed;
-    if (speed < TRACK_MIN_SPEED)
-        speed = TRACK_MIN_SPEED;
-    if (speed > TRACK_MAX_SPEED)
-        speed = TRACK_MAX_SPEED;
-
-    desired_direction = (target_speed >= 0.0f) ? 0 : 1;
-
-    /* Stop STEP, satisfy DIR setup time, then resume at the new speed. */
-    if (desired_direction != motor->Direction)
+    /* Do not wind the integral farther into an output limit. */
+    if (!((output > pid->Max_Output && error > 0.0f) ||
+          (output < pid->Min_Output && error < 0.0f)))
     {
-        STEP_PWM_SetFreq(0);
-        motor->Step_Frequency = 0;
-        EMM_Set_Direction(motor, desired_direction);
-        Delay_us(5);
+        pid->Integral = candidate_integral;
     }
 
-    EMM_Set_Speed(motor, speed);
-}
-
-void EMM_Set_Speed(EMM_Motor *motor, float frequency)
-{
-    float current_speed = motor->Step_Frequency;
-
-    EMM_Enable(motor);
-
-    /* Slew the command so every new vision frame does not cause a speed jump. */
-    if (frequency > current_speed + TRACK_SPEED_RAMP)
-        current_speed += TRACK_SPEED_RAMP;
-    else if (frequency + TRACK_SPEED_RAMP < current_speed)
-        current_speed -= TRACK_SPEED_RAMP;
-    else
-        current_speed = frequency;
-
-    if (current_speed < TRACK_MIN_SPEED)
-        current_speed = TRACK_MIN_SPEED;
-    if (current_speed > TRACK_MAX_SPEED)
-        current_speed = TRACK_MAX_SPEED;
-
-    motor->Step_Frequency = current_speed;
-    STEP_PWM_SetFreq((uint32_t)current_speed);
+    output = ClampFloat(output, pid->Min_Output, pid->Max_Output);
+    pid->Last_Error = error;
+    return output;
 }
