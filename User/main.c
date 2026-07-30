@@ -39,17 +39,27 @@
 #define BALANCE_CENTER_HOLD_PIXELS      8.0f
 #define BALANCE_CENTER_HOLD_VELOCITY   70.0f
 #define BALANCE_MOTOR_SIGN              1.0f
-/* Requirement 3 point-to-point tuning; both legs use the balance controller. */
-#define MODE3_PLUS_REACH_PIXELS       15.0f
-#define MODE3_BRAKE_STEP_KP             10.0f
-#define MODE3_BRAKE_PREDICT_TIME_S       0.35f
-#define MODE3_BRAKE_MIN_VELOCITY        90.0f
-#define MODE3_BRAKE_RELEASE_VELOCITY    60.0f
-#define MODE3_BRAKE_HOLD_FRAMES             2
-#define MODE3_BRAKE_MIN_TARGET_STEPS   600.0f
-#define MODE3_FINAL_ERROR_PIXELS         8.0f
-#define MODE3_FINAL_VELOCITY            35.0f
-#define MODE3_FINAL_STABLE_FRAMES           8
+/* Requirement 3 point-to-point tuning. */
+#define MODE3_PLUS_REACH_PIXELS                    15.0f
+#define MODE3_PLUS_BRAKE_ENABLE_PIXELS             60.0f
+#define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          300.0f
+#define MODE3_PLUS_BRAKE_STEP_KP                     6.0f
+#define MODE3_PLUS_BRAKE_PREDICT_TIME_S              0.05f
+#define MODE3_PLUS_BRAKE_MIN_VELOCITY              130.0f
+#define MODE3_PLUS_BRAKE_RELEASE_VELOCITY           90.0f
+#define MODE3_PLUS_BRAKE_HOLD_FRAMES                    1
+#define MODE3_PLUS_BRAKE_MIN_TARGET_STEPS          300.0f
+#define MODE3_MINUS_BRAKE_STEP_KP                    8.0f
+#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.42f
+#define MODE3_MINUS_BRAKE_MIN_VELOCITY              90.0f
+#define MODE3_MINUS_BRAKE_RELEASE_VELOCITY          60.0f
+#define MODE3_MINUS_BRAKE_HOLD_FRAMES                   2
+#define MODE3_MINUS_BRAKE_MIN_TARGET_STEPS         600.0f
+#define MODE3_MINUS_BRAKE_TAPER_PIXELS              50.0f
+#define MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS    180.0f
+#define MODE3_FINAL_ERROR_PIXELS                     8.0f
+#define MODE3_FINAL_VELOCITY                        35.0f
+#define MODE3_FINAL_STABLE_FRAMES                       8
 /* STM32端滤波，抑制相机单像素抖动；大小跳变使用不同滤波系数 */
 #define POSITION_FILTER_ALPHA_NEAR    0.48f    // 小球位置变化小时，滤波系数，数值越小滤波越强
 #define POSITION_FILTER_ALPHA_FAR     0.78f    // 小球位置变化大时，滤波系数，响应更快
@@ -222,12 +232,34 @@ static void Balance_UpdateTargetPosition(float dt_s)
 
     if (CurrentMode == MODE_REQUIREMENT_3)
     {
-        brake_step_kp = MODE3_BRAKE_STEP_KP;
-        brake_predict_time_s = MODE3_BRAKE_PREDICT_TIME_S;
-        brake_min_velocity = MODE3_BRAKE_MIN_VELOCITY;
-        brake_release_velocity = MODE3_BRAKE_RELEASE_VELOCITY;
-        brake_hold_frames = MODE3_BRAKE_HOLD_FRAMES;
-        brake_min_target_steps = MODE3_BRAKE_MIN_TARGET_STEPS;
+        if (Mode3Phase == MODE3_PHASE_TO_PLUS)
+        {
+            brake_step_kp = MODE3_PLUS_BRAKE_STEP_KP;
+            brake_predict_time_s = MODE3_PLUS_BRAKE_PREDICT_TIME_S;
+            brake_min_velocity = MODE3_PLUS_BRAKE_MIN_VELOCITY;
+            brake_release_velocity = MODE3_PLUS_BRAKE_RELEASE_VELOCITY;
+            brake_hold_frames = MODE3_PLUS_BRAKE_HOLD_FRAMES;
+            brake_min_target_steps = MODE3_PLUS_BRAKE_MIN_TARGET_STEPS;
+        }
+        else
+        {
+            float taper_ratio;
+
+            brake_step_kp = MODE3_MINUS_BRAKE_STEP_KP;
+            brake_predict_time_s = MODE3_MINUS_BRAKE_PREDICT_TIME_S;
+            brake_min_velocity = MODE3_MINUS_BRAKE_MIN_VELOCITY;
+            brake_release_velocity = MODE3_MINUS_BRAKE_RELEASE_VELOCITY;
+            brake_hold_frames = MODE3_MINUS_BRAKE_HOLD_FRAMES;
+
+            /* Reduce only the forced minimum near -5; calculated high-speed braking remains available. */
+            taper_ratio = ClampFloat(abs_error /
+                                     MODE3_MINUS_BRAKE_TAPER_PIXELS,
+                                     0.0f, 1.0f);
+            brake_min_target_steps =
+                MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS +
+                (MODE3_MINUS_BRAKE_MIN_TARGET_STEPS -
+                 MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS) * taper_ratio;
+        }
     }
     else
     {
@@ -271,6 +303,14 @@ static void Balance_UpdateTargetPosition(float dt_s)
     brake_request =
         (AbsFloat(BallVelocityX) >= brake_min_velocity &&
          control_effort * BallVelocityX > 0.0f);
+    if (CurrentMode == MODE_REQUIREMENT_3 &&
+        Mode3Phase == MODE3_PHASE_TO_PLUS &&
+        abs_error > MODE3_PLUS_BRAKE_ENABLE_PIXELS)
+    {
+        brake_request = 0;
+        BalanceBrakeHoldFrames = 0;
+        BalanceBrakeDirection = 0;
+    }
 
     if (brake_request)
     {
@@ -330,6 +370,23 @@ static void Balance_UpdateTargetPosition(float dt_s)
         }
     }
 
+    if (CurrentMode == MODE_REQUIREMENT_3 &&
+        Mode3Phase == MODE3_PHASE_TO_PLUS &&
+        abs_error > MODE3_PLUS_BRAKE_ENABLE_PIXELS)
+    {
+        /* Keep driving toward +5 until the dedicated braking zone begins. */
+        if (BalanceErrorX > 0.0f &&
+            raw_target < MODE3_PLUS_DRIVE_MIN_TARGET_STEPS)
+        {
+            raw_target = MODE3_PLUS_DRIVE_MIN_TARGET_STEPS;
+        }
+        else if (BalanceErrorX < 0.0f &&
+                 raw_target > -MODE3_PLUS_DRIVE_MIN_TARGET_STEPS)
+        {
+            raw_target = -MODE3_PLUS_DRIVE_MIN_TARGET_STEPS;
+        }
+    }
+
     raw_target *= BALANCE_MOTOR_SIGN;
     raw_target = ClampFloat(raw_target,
                             -BALANCE_TARGET_LIMIT_STEPS,
@@ -349,8 +406,10 @@ static void Mode3_UpdatePhase(void)
 {
     if (Mode3Phase == MODE3_PHASE_TO_PLUS)
     {
-        if (AbsFloat(BallFilteredX - (float)BALL_PLUS_5CM_X) <=
-            MODE3_PLUS_REACH_PIXELS)
+        float plus_error = BallFilteredX - (float)BALL_PLUS_5CM_X;
+
+        if (AbsFloat(plus_error) <= MODE3_PLUS_REACH_PIXELS ||
+            (plus_error > MODE3_PLUS_REACH_PIXELS && BallVelocityX > 0.0f))
         {
             Mode3Phase = MODE3_PHASE_TO_MINUS;
             BalanceTargetX = BALL_MINUS_5CM_X;
