@@ -37,9 +37,45 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 其中速度单位为像素/秒。有效坐标范围为1~639。收到0、640或更大的值时，主控立即停止STEP脉冲；
 摄像头不再发送数据时，主控会在120 ms超时后执行相同的停机保护。
 
-模式2采用分段速度PID：远离中心时提高 `Kp` 和速度上限，接近中心时降低 `Kp`，
-同时增大 `Kd` 并使用位置预测；当小球向中心运动时，电机输出会提前反向制动，
-回到中心附近后只进行低速微调。模式1也使用小球速度预测提前切换反向倾角和水平位置。
-相关参数集中在 `User/main.c` 顶部，现场优先调节 `BALANCE_BRAKE_PREDICT_MIN_S`、
-`BALANCE_BRAKE_PREDICT_MAX_S`、`BALANCE_KD_BRAKE`、`MODE1_BRAKE_PREDICT_TIME_S`
-和两个 `MODE1_*_BRAKE_MARGIN_PIXELS`。
+## 位置-速度串级平衡
+
+模式2以及模式1到达 -5 cm 后的稳定阶段使用同一套位置-速度串级反馈。定义：
+
+```text
+e = 小球坐标 - 目标坐标
+v_ref = -Kpos(e) * e
+v_error = v_ref - 小球实测速度
+电机目标步数 = -Kvel * v_error + 中心附近积分补偿
+```
+
+`Kpos(e)` 会随误差大小在近端、远端增益之间变化。小球在目标右侧且静止时，
+`e > 0`、`v_ref < 0`，电机目标步数为正，管道顺时针升高并让小球向中心加速。
+当小球向中心的负速度超过 `v_ref` 时，`v_error` 会在小球到达中心前变为正，
+目标步数随即变为负，电机快速反向到水平位置另一侧进行制动。左侧过程完全对称。
+每次过中心后的误差和速度都会继续进入同一关系，逐次减小振幅，最后进入中心保持区。
+
+电机使用固定高速追踪目标步数，普通目标变化经过轻微滤波；目标步数一旦反号，
+滤波会被旁路以保证制动换向及时。积分只在中心附近启用，用于补偿管道零位和摩擦造成的静态偏差。
+
+## 串级控制调参
+
+建议先把 `BALANCE_POSITION_INTEGRAL_KI` 临时设为0，调好位置/速度反馈后再加积分：
+
+- `BALANCE_MOTOR_SIGN`：方向不符时只把 `1.0f` 改为 `-1.0f`。
+- `BALANCE_POSITION_VEL_KP_FAR`：远离目标时允许的回中心速度斜率；增大后加速更积极、制动更晚。
+- `BALANCE_POSITION_VEL_KP_NEAR`：接近目标时的速度斜率；减小会更早制动，过小则靠近中心很慢。
+- `BALANCE_VELOCITY_STEP_KP`：速度误差对应的倾角/目标步数；增大可增强加速和反向制动力，过大会高频摆动。
+- `BALANCE_DESIRED_VELOCITY_MAX`：期望速度上限；过冲严重时先降低，响应不足时再提高。
+- `BALANCE_TARGET_LIMIT_STEPS`：最大倾斜步数，限制最强加速和制动角度。
+- `BALANCE_TARGET_FILTER_ALPHA`：同方向目标步数的响应系数，越接近1越敏捷；反号换向始终立即执行。
+- `BALANCE_MOTOR_FIXED_SPEED_HZ`：追踪目标步数的统一高速；失步时降低，换向和到位太慢时提高。
+- `BALANCE_MOTOR_STOP_WINDOW_STEPS`：目标步数停止窗口；太大会动作不足，太小会在目标位置附近来回补脉冲。
+- `BALANCE_POSITION_INTEGRAL_KI`：最后消除静态偏差；只能小幅增加，持续低频摆动时应减小。
+
+现场判断方法：还没接近中心就制动且响应慢，增大近端 `Kpos`；到中心速度仍很大，
+减小近端 `Kpos` 或增大 `Kvel`；电机反向了但制动力不足，优先增大 `Kvel` 或最大目标步数；
+中心附近快速抖动则减小 `Kvel`、增大停止窗口或加强速度滤波。
+
+模式1前三个轨迹阶段仍通过 `MODE1_BRAKE_PREDICT_TIME_S`、
+`MODE1_LEVEL_PREDICT_TIME_S`、两个 `MODE1_*_BRAKE_MARGIN_PIXELS` 和切换坐标提前换向；
+进入 -5 cm 保持阶段后自动切换到上述串级反馈。

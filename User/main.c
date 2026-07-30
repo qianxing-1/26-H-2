@@ -16,29 +16,22 @@
 #define TARGET_STALE_MS              120        // 视觉数据超时时间，超过该时间认为目标丢失
 #define DISPLAY_PERIOD_MS             80        // OLED屏幕刷新周期
 
-/* 平衡控制PID参数；输出正数代表电机顺时针转动 */
-#define BALANCE_KP                   6.0f
-#define BALANCE_KI                   0.0f
-#define BALANCE_KD                   2.20f
-#define BALANCE_INTEGRAL_LIMIT       80.0f
-#define BALANCE_MAX_SPEED_HZ        5000.0f
-#define BALANCE_MIN_COMMAND_HZ       24.0f
-#define BALANCE_POSITION_DEADBAND      4.0f
-#define BALANCE_VELOCITY_DEADBAND     30.0f
-#define BALANCE_MOTOR_SIGN             1.0f
-#define BALANCE_KP_FAR                 8.0f
-#define BALANCE_KP_NEAR                3.2f
-#define BALANCE_KD_FAR                 2.2f
-#define BALANCE_KD_BRAKE               7.0f
-#define BALANCE_MAX_SPEED_NEAR_HZ   2600.0f
-#define BALANCE_MAX_SPEED_MICRO_HZ  1100.0f
-#define BALANCE_NEAR_ERROR_PIXELS     55.0f
-#define BALANCE_BRAKE_ERROR_PIXELS    90.0f
-#define BALANCE_BRAKE_PREDICT_MIN_S    0.12f
-#define BALANCE_BRAKE_PREDICT_MAX_S    0.30f
-#define BALANCE_BRAKE_MIN_VELOCITY    35.0f
-#define BALANCE_CENTER_HOLD_PIXELS     6.0f
-#define BALANCE_CENTER_HOLD_VELOCITY  30.0f
+/* Position/velocity cascade tuning; positive target steps command CW/up. */
+#define BALANCE_POSITION_VEL_KP_FAR    2.4f
+#define BALANCE_POSITION_VEL_KP_NEAR   0.9f
+#define BALANCE_DESIRED_VELOCITY_MAX 650.0f
+#define BALANCE_VELOCITY_STEP_KP       4.5f
+#define BALANCE_POSITION_INTEGRAL_KI   2.0f
+#define BALANCE_GAIN_SCHEDULE_PIXELS 100.0f
+#define BALANCE_INTEGRAL_ZONE_PIXELS  45.0f
+#define BALANCE_INTEGRAL_MAX_STEPS   260.0f
+#define BALANCE_TARGET_LIMIT_STEPS  2600.0f
+#define BALANCE_TARGET_FILTER_ALPHA    0.72f
+#define BALANCE_MOTOR_FIXED_SPEED_HZ 8500.0f
+#define BALANCE_MOTOR_STOP_WINDOW_STEPS 55.0f
+#define BALANCE_CENTER_HOLD_PIXELS      4.0f
+#define BALANCE_CENTER_HOLD_VELOCITY   22.0f
+#define BALANCE_MOTOR_SIGN              1.0f
 /* Mode 1 trajectory tuning: 400 steps = 1 mm, about 1745 steps = 1 degree. */
 #define MODE1_HEIGHT_SIGN                1.0f
 #define MODE1_ACCEL_HEIGHT_STEPS      1800.0f
@@ -49,13 +42,7 @@
 #define MODE1_LEVEL_PREDICT_TIME_S        0.20f
 #define MODE1_PLUS_BRAKE_MARGIN_PIXELS   18.0f
 #define MODE1_MINUS_BRAKE_MARGIN_PIXELS  18.0f
-#define MODE1_FINAL_MICRO_KP               1.8f
-#define MODE1_FINAL_MICRO_KD               0.9f
-#define MODE1_FINAL_MICRO_MAX_STEPS      300.0f
-#define MODE1_MOTOR_POSITION_KP          8.0f
-#define MODE1_MOTOR_DEADBAND_STEPS       6.0f
 #define MODE1_STOP_WINDOW_STEPS       35.0f
-#define MODE1_FINAL_MICRO_SPEED_HZ    MODE1_FIXED_SPEED_HZ
 /* Switch early so inertia carries the ball to the requested endpoints. */
 #define MODE1_START_ERROR_PIXELS       12.0f
 #define MODE1_START_VELOCITY           35.0f
@@ -99,7 +86,9 @@ static volatile float BallFilteredX = 0.0f;                   // 滤波之后小球X坐
 static volatile float BallVelocityX = 0.0f;                   // 小球X方向速度，像素每秒
 static volatile float CameraVelocityX = 0.0f;
 static volatile float BalanceErrorX = 0.0f;                   // 位置误差=滤波小球坐标?目标坐标
-static volatile float BalanceSpeedCommand = 0.0f;              // PID输出电机转速指令Hz
+static volatile float BalanceSpeedCommand = 0.0f;              // Final signed motor frequency command in Hz
+static volatile float BalanceTargetSteps = 0.0f;
+static volatile float BalanceIntegralSteps = 0.0f;
 static volatile uint32_t Mode3CompleteMs = 0;
 static volatile uint32_t Mode1PhaseStartMs = 0;
 
@@ -108,7 +97,6 @@ static uint32_t LastSampleMs = 0;              // 上一次采样小球位置时间戳ms
 static float LastFilteredX = 0.0f;             // 上一时刻滤波后的小球X，用于微分求速度
 
 EMM_Motor BalanceMotor;                        // 云台电机结构体实例
-PID_Controller BalancePID;                     // PID控制器实例
 
 /**
  * @brief 浮点数求绝对值
@@ -153,7 +141,7 @@ static uint8_t TargetIsFresh(uint16_t target_x, uint32_t last_rx_ms)
 }
 
 /**
- * @brief 重置观测器、滤波器、PID；丢失小球/停止控制调用
+ * @brief Reset vision estimates and cascade-control state.
  */
 static void Balance_ResetEstimator(void)
 {
@@ -166,7 +154,8 @@ static void Balance_ResetEstimator(void)
     CameraVelocityX = 0.0f;
     BalanceErrorX = 0.0f;
     BalanceSpeedCommand = 0.0f;
-    PID_Reset(&BalancePID);   // 清空PID积分、微分项
+    BalanceTargetSteps = 0.0f;
+    BalanceIntegralSteps = 0.0f;
 }
 
 /**
@@ -216,36 +205,82 @@ static float Mode1_TargetHeightSteps(void)
     return target * MODE1_HEIGHT_SIGN;
 }
 
-static float Mode1_CalculateMotorSpeed(void)
+static float PositionServo_CalculateSpeed(float target_steps,
+                                          float fixed_speed,
+                                          float stop_window)
 {
-    float position_error;
-    float output;
-    float micro_target;
-    float speed_limit;
+    float position_error = target_steps - BalanceMotor.Position_Estimate;
 
-    position_error = Mode1_TargetHeightSteps() - BalanceMotor.Position_Estimate;
-    speed_limit = MODE1_FIXED_SPEED_HZ;
+    if (AbsFloat(position_error) <= stop_window)
+        return 0.0f;
+    return (position_error > 0.0f) ? fixed_speed : -fixed_speed;
+}
 
-    /* Final hold uses a deliberately smaller correction speed. */
-    if (Mode3Phase == MODE3_PHASE_HOLD_MINUS && VisionValid)
+static void Balance_UpdateTargetPosition(float dt_s)
+{
+    float abs_error = AbsFloat(BalanceErrorX);
+    float gain_ratio;
+    float position_velocity_kp;
+    float desired_velocity;
+    float velocity_error;
+    float raw_target;
+    float alpha = BALANCE_TARGET_FILTER_ALPHA;
+
+    gain_ratio = ClampFloat(abs_error / BALANCE_GAIN_SCHEDULE_PIXELS,
+                            0.0f, 1.0f);
+    position_velocity_kp = BALANCE_POSITION_VEL_KP_NEAR +
+        (BALANCE_POSITION_VEL_KP_FAR -
+         BALANCE_POSITION_VEL_KP_NEAR) * gain_ratio;
+
+    /* The desired ball speed always points from its position to the target. */
+    desired_velocity = -position_velocity_kp * BalanceErrorX;
+    desired_velocity = ClampFloat(desired_velocity,
+                                  -BALANCE_DESIRED_VELOCITY_MAX,
+                                  BALANCE_DESIRED_VELOCITY_MAX);
+    velocity_error = desired_velocity - BallVelocityX;
+
+    if (abs_error <= BALANCE_INTEGRAL_ZONE_PIXELS)
     {
-        micro_target = -MODE1_FINAL_MICRO_KP *
-                       (BallFilteredX - (float)BALL_MINUS_5CM_X) -
-                       MODE1_FINAL_MICRO_KD * BallVelocityX;
-        micro_target = ClampFloat(micro_target,
-                                  -MODE1_FINAL_MICRO_MAX_STEPS,
-                                  MODE1_FINAL_MICRO_MAX_STEPS);
-        position_error += micro_target;
-        speed_limit = MODE1_FINAL_MICRO_SPEED_HZ;
+        BalanceIntegralSteps +=
+            BALANCE_POSITION_INTEGRAL_KI * BalanceErrorX * dt_s;
+        BalanceIntegralSteps = ClampFloat(BalanceIntegralSteps,
+                                          -BALANCE_INTEGRAL_MAX_STEPS,
+                                          BALANCE_INTEGRAL_MAX_STEPS);
+    }
+    else
+    {
+        BalanceIntegralSteps *= 0.85f;
     }
 
-    /* Run at one fixed high speed; only the commanded step distance changes. */
-    if (AbsFloat(position_error) <= MODE1_STOP_WINDOW_STEPS)
-        return 0.0f;
+    if (abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
+        AbsFloat(BallVelocityX) <= BALANCE_CENTER_HOLD_VELOCITY)
+    {
+        /* Keep the learned level offset instead of discarding static bias. */
+        raw_target = BalanceIntegralSteps;
+    }
+    else
+    {
+        /*
+         * If the ball moves toward the target faster than desired,
+         * velocity_error changes sign before arrival and reverses the tilt.
+         */
+        raw_target = -BALANCE_VELOCITY_STEP_KP * velocity_error +
+                     BalanceIntegralSteps;
+    }
 
-    output = (position_error > 0.0f) ? speed_limit : -speed_limit;
-    return output;
+    raw_target *= BALANCE_MOTOR_SIGN;
+    raw_target = ClampFloat(raw_target,
+                            -BALANCE_TARGET_LIMIT_STEPS,
+                            BALANCE_TARGET_LIMIT_STEPS);
+
+    /* A braking reversal must not be delayed by target filtering. */
+    if (raw_target * BalanceTargetSteps < 0.0f)
+        alpha = 1.0f;
+
+    BalanceTargetSteps +=
+        (raw_target - BalanceTargetSteps) * alpha;
 }
+
 static void Mode1_UpdatePhase(void)
 {
     uint32_t phase_elapsed_ms = SystemTickMs - Mode1PhaseStartMs;
@@ -303,7 +338,7 @@ static void Mode1_UpdatePhase(void)
         Mode3CompleteMs = SystemTickMs;
 }
 /**
- * @brief 处理一帧新视觉数据：滤波、速度估算、状态机、PID运算
+ * @brief Process a new vision frame and update position/velocity feedback.
  * @param target_x 原始小球X像素
  * @param frame_id 视觉帧序号
  * @param sample_ms 接收该帧时间戳ms
@@ -318,8 +353,6 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
     float alpha;
     float measured_velocity = 0.0f;
     float camera_velocity;
-    float output;
-    float control_error;
 
     LastControlFrameId = frame_id;
 
@@ -376,58 +409,15 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
 
     BalanceErrorX = BallFilteredX - (float)BalanceTargetX;
 
-    /* Mode 1 uses its own three-stage motor position trajectory. */
-    if (CurrentMode == MODE_REQUIREMENT_3)
-        return;
+    if (CurrentMode == MODE_REQUIREMENT_3 &&
+        Mode3Phase != MODE3_PHASE_HOLD_MINUS)
     {
-        float abs_error = AbsFloat(BalanceErrorX);
-        float abs_velocity = AbsFloat(BallVelocityX);
-        float prediction_time;
-        float speed_limit;
-        uint8_t moving_to_center = (BalanceErrorX * BallVelocityX < 0.0f) &&
-                                    (abs_velocity >= BALANCE_BRAKE_MIN_VELOCITY);
-        if (abs_error >= BALANCE_BRAKE_ERROR_PIXELS)
-        {
-            BalancePID.Kp = BALANCE_KP_FAR;
-            BalancePID.Kd = BALANCE_KD_FAR;
-            speed_limit = BALANCE_MAX_SPEED_HZ;
-        }
-        else if (abs_error >= BALANCE_NEAR_ERROR_PIXELS)
-        {
-            BalancePID.Kp = BALANCE_KP;
-            BalancePID.Kd = BALANCE_KD_FAR;
-            speed_limit = BALANCE_MAX_SPEED_NEAR_HZ;
-        }
-        else
-        {
-            BalancePID.Kp = BALANCE_KP_NEAR;
-            BalancePID.Kd = BALANCE_KD_BRAKE;
-            speed_limit = BALANCE_MAX_SPEED_MICRO_HZ;
-        }
-        control_error = BalanceErrorX;
-        if (moving_to_center)
-        {
-            prediction_time = ClampFloat(BALANCE_BRAKE_PREDICT_MIN_S +
-                                          abs_velocity * 0.00008f,
-                                          BALANCE_BRAKE_PREDICT_MIN_S,
-                                          BALANCE_BRAKE_PREDICT_MAX_S);
-            control_error += BallVelocityX * prediction_time;
-            BalancePID.Kd = BALANCE_KD_BRAKE;
-        }
-        if (abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
-            abs_velocity <= BALANCE_CENTER_HOLD_VELOCITY)
-        {
-            BalancePID.Integral *= 0.80f;
-            BalanceSpeedCommand = 0.0f;
-            return;
-        }
-        output = PID_Calculate(&BalancePID, control_error, BallVelocityX, dt_s);
-        output = ClampFloat(output, -speed_limit, speed_limit);
-        output *= BALANCE_MOTOR_SIGN;
-        if (AbsFloat(output) < BALANCE_MIN_COMMAND_HZ)
-            output = 0.0f;
-        BalanceSpeedCommand = output;
+        BalanceTargetSteps = Mode1_TargetHeightSteps();
+        BalanceIntegralSteps = 0.0f;
+        return;
     }
+
+    Balance_UpdateTargetPosition(dt_s);
 }
 
 /**
@@ -459,16 +449,28 @@ static void Balance_ControlTick(void)
     }
 
     // 将速度指令下发电机驱动
-    /* The Mode 1 motor position loop runs every 5 ms. */
-    if (CurrentMode == MODE_REQUIREMENT_3)
-        BalanceSpeedCommand = Mode1_CalculateMotorSpeed();
-
+    if (CurrentMode == MODE_REQUIREMENT_3 &&
+        Mode3Phase != MODE3_PHASE_HOLD_MINUS)
+    {
+        BalanceTargetSteps = Mode1_TargetHeightSteps();
+        BalanceSpeedCommand =
+            PositionServo_CalculateSpeed(BalanceTargetSteps,
+                                         MODE1_FIXED_SPEED_HZ,
+                                         MODE1_STOP_WINDOW_STEPS);
+    }
+    else
+    {
+        BalanceSpeedCommand =
+            PositionServo_CalculateSpeed(BalanceTargetSteps,
+                                         BALANCE_MOTOR_FIXED_SPEED_HZ,
+                                         BALANCE_MOTOR_STOP_WINDOW_STEPS);
+    }
     EMM_Apply_Speed(&BalanceMotor, BalanceSpeedCommand,
                     (float)CONTROL_PERIOD_MS / 1000.0f);
 }
 
 /**
- * @brief 云台电机与PID控制器初始化
+ * @brief Initialize the balance stepper motor.
  */
 static void BalanceMotor_Init(void)
 {
@@ -480,11 +482,6 @@ static void BalanceMotor_Init(void)
     BalanceMotor.ENA_Port = GPIOA;
     BalanceMotor.ENA_Pin = GPIO_Pin_12;
     EMM_Motor_Init(&BalanceMotor);
-
-    // PID初始化，配置参数与输出限幅
-    PID_Init(&BalancePID, BALANCE_KP, BALANCE_KI, BALANCE_KD,
-             BALANCE_INTEGRAL_LIMIT,
-             BALANCE_MAX_SPEED_HZ, -BALANCE_MAX_SPEED_HZ);
 }
 
 /**
@@ -567,7 +564,7 @@ int main(void)
     Key_Init();         // 按键初始化
     OLED_Init();        // OLED屏幕初始化
     STEP_PWM_Init();    // 步进电机PWM时钟初始化
-    BalanceMotor_Init();// 云台电机、PID初始化
+    BalanceMotor_Init();// Initialize the balance stepper motor
     Timer_Init();       // TIM2定时器初始化，提供系统节拍与控制节拍
     OLED_ShowStatus();
 
