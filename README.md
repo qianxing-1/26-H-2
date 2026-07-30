@@ -16,9 +16,14 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 
 按下开始键后不检查小球是否位于中心，第一目标固定为 `BALL_PLUS_5CM_X`。
 小球进入 `MODE3_PLUS_REACH_PIXELS` 范围后立即把目标切换为 `BALL_MINUS_5CM_X`，
-两个阶段都使用和模式2相同的位置、速度、预测制动控制参数。
+两个阶段共用模式3独立的预测制动参数；加速、位置和速度环参数暂时仍与模式2共用。
 
 - `MODE3_PLUS_REACH_PIXELS`：认为已经到达 +5 cm 的位置窗口；增大会更早切换到 -5 cm。
+- `MODE3_BRAKE_STEP_KP`：模式3独立制动增益，不影响模式2中心平衡。
+- `MODE3_BRAKE_PREDICT_TIME_S`：模式3独立预测时间；中途过早刹停时减小，到端点速度仍大时增大。
+- `MODE3_BRAKE_MIN_VELOCITY`、`MODE3_BRAKE_RELEASE_VELOCITY`：模式3进入和退出强制动的速度滞回阈值。
+- `MODE3_BRAKE_HOLD_FRAMES`：模式3制动保持帧数；当前2帧在50 FPS下约40 ms。
+- `MODE3_BRAKE_MIN_TARGET_STEPS`：模式3高速制动的最小反向倾角；过大容易在途中被刹停。
 - `MODE3_FINAL_ERROR_PIXELS`：最终位于 -5 cm 附近的位置判定窗口。
 - `MODE3_FINAL_VELOCITY`：最终完成判定允许的小球速度。
 - `MODE3_FINAL_STABLE_FRAMES`：位置和速度连续满足条件的视觉帧数。
@@ -79,3 +84,6 @@ v_error = v_ref - 小球实测速度
 现场判断方法：还没接近中心就制动且响应慢，增大近端 `Kpos`；到中心速度仍很大，
 减小近端 `Kpos` 或增大预测时间；电机反向了但制动力不足，优先增大 `BRAKE_STEP_KP` 或最小制动步数；
 中心附近快速抖动则提高制动速度阈值、增加保持帧数、增大停止窗口或加强速度滤波。
+
+`BALANCE_BRAKE_*` 参数只用于模式2；模式3使用独立的 `MODE3_BRAKE_*` 参数。
+当前模式3去 +5 和去 -5 共用同一组参数。

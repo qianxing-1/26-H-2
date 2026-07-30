@@ -41,9 +41,15 @@
 #define BALANCE_MOTOR_SIGN              1.0f
 /* Requirement 3 point-to-point tuning; both legs use the balance controller. */
 #define MODE3_PLUS_REACH_PIXELS       15.0f
-#define MODE3_FINAL_ERROR_PIXELS       8.0f
-#define MODE3_FINAL_VELOCITY          35.0f
-#define MODE3_FINAL_STABLE_FRAMES         8
+#define MODE3_BRAKE_STEP_KP             10.0f
+#define MODE3_BRAKE_PREDICT_TIME_S       0.35f
+#define MODE3_BRAKE_MIN_VELOCITY        90.0f
+#define MODE3_BRAKE_RELEASE_VELOCITY    60.0f
+#define MODE3_BRAKE_HOLD_FRAMES             2
+#define MODE3_BRAKE_MIN_TARGET_STEPS   600.0f
+#define MODE3_FINAL_ERROR_PIXELS         8.0f
+#define MODE3_FINAL_VELOCITY            35.0f
+#define MODE3_FINAL_STABLE_FRAMES           8
 /* STM32端滤波，抑制相机单像素抖动；大小跳变使用不同滤波系数 */
 #define POSITION_FILTER_ALPHA_NEAR    0.48f    // 小球位置变化小时，滤波系数，数值越小滤波越强
 #define POSITION_FILTER_ALPHA_FAR     0.78f    // 小球位置变化大时，滤波系数，响应更快
@@ -203,14 +209,39 @@ static void Balance_UpdateTargetPosition(float dt_s)
     float control_effort;
     float step_gain;
     float raw_target;
+    float brake_step_kp;
+    float brake_predict_time_s;
+    float brake_min_velocity;
+    float brake_release_velocity;
+    float brake_min_target_steps;
+    uint8_t brake_hold_frames;
     float alpha = BALANCE_TARGET_FILTER_ALPHA;
     uint8_t brake_request;
     uint8_t braking = 0;
     int8_t motion_direction = 0;
 
+    if (CurrentMode == MODE_REQUIREMENT_3)
+    {
+        brake_step_kp = MODE3_BRAKE_STEP_KP;
+        brake_predict_time_s = MODE3_BRAKE_PREDICT_TIME_S;
+        brake_min_velocity = MODE3_BRAKE_MIN_VELOCITY;
+        brake_release_velocity = MODE3_BRAKE_RELEASE_VELOCITY;
+        brake_hold_frames = MODE3_BRAKE_HOLD_FRAMES;
+        brake_min_target_steps = MODE3_BRAKE_MIN_TARGET_STEPS;
+    }
+    else
+    {
+        brake_step_kp = BALANCE_BRAKE_STEP_KP;
+        brake_predict_time_s = BALANCE_BRAKE_PREDICT_TIME_S;
+        brake_min_velocity = BALANCE_BRAKE_MIN_VELOCITY;
+        brake_release_velocity = BALANCE_BRAKE_RELEASE_VELOCITY;
+        brake_hold_frames = BALANCE_BRAKE_HOLD_FRAMES;
+        brake_min_target_steps = BALANCE_BRAKE_MIN_TARGET_STEPS;
+    }
+
     /* Predict the ball position after camera, motor and linkage delay. */
     predicted_error = BalanceErrorX +
-        BallVelocityX * BALANCE_BRAKE_PREDICT_TIME_S;
+        BallVelocityX * brake_predict_time_s;
     predicted_error = ClampFloat(predicted_error,
                                  -(float)BALL_COORDINATE_MAX,
                                  (float)BALL_COORDINATE_MAX);
@@ -238,17 +269,17 @@ static void Balance_UpdateTargetPosition(float dt_s)
 
     /* Control effort with the same sign as velocity produces braking tilt. */
     brake_request =
-        (AbsFloat(BallVelocityX) >= BALANCE_BRAKE_MIN_VELOCITY &&
+        (AbsFloat(BallVelocityX) >= brake_min_velocity &&
          control_effort * BallVelocityX > 0.0f);
 
     if (brake_request)
     {
-        BalanceBrakeHoldFrames = BALANCE_BRAKE_HOLD_FRAMES;
+        BalanceBrakeHoldFrames = brake_hold_frames;
         BalanceBrakeDirection = motion_direction;
         braking = 1;
     }
     else if (BalanceBrakeHoldFrames > 0 &&
-             AbsFloat(BallVelocityX) >= BALANCE_BRAKE_RELEASE_VELOCITY &&
+             AbsFloat(BallVelocityX) >= brake_release_velocity &&
              motion_direction == BalanceBrakeDirection)
     {
         BalanceBrakeHoldFrames--;
@@ -260,7 +291,7 @@ static void Balance_UpdateTargetPosition(float dt_s)
         BalanceBrakeDirection = 0;
     }
 
-    step_gain = braking ? BALANCE_BRAKE_STEP_KP :
+    step_gain = braking ? brake_step_kp :
                            BALANCE_ACCEL_STEP_KP;
 
     if (abs_error <= BALANCE_INTEGRAL_ZONE_PIXELS)
@@ -292,10 +323,10 @@ static void Balance_UpdateTargetPosition(float dt_s)
         raw_target = step_gain * control_effort + BalanceIntegralSteps;
 
         if (braking &&
-            AbsFloat(raw_target) < BALANCE_BRAKE_MIN_TARGET_STEPS)
+            AbsFloat(raw_target) < brake_min_target_steps)
         {
             raw_target = (float)BalanceBrakeDirection *
-                         BALANCE_BRAKE_MIN_TARGET_STEPS;
+                         brake_min_target_steps;
         }
     }
 
