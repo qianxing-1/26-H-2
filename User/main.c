@@ -44,9 +44,7 @@
 #define MODE1_ACCEL_HEIGHT_STEPS      1800.0f
 #define MODE1_BRAKE_HEIGHT_STEPS     -2200.0f
 #define MODE1_LEVEL_HEIGHT_STEPS         0.0f
-#define MODE1_ACCEL_SPEED_HZ          5000.0f
-#define MODE1_BRAKE_SPEED_HZ          5600.0f
-#define MODE1_LEVEL_SPEED_HZ          4500.0f
+#define MODE1_FIXED_SPEED_HZ          5200.0f
 #define MODE1_BRAKE_PREDICT_TIME_S       0.24f
 #define MODE1_LEVEL_PREDICT_TIME_S        0.20f
 #define MODE1_PLUS_BRAKE_MARGIN_PIXELS   18.0f
@@ -56,6 +54,8 @@
 #define MODE1_FINAL_MICRO_MAX_STEPS      300.0f
 #define MODE1_MOTOR_POSITION_KP          8.0f
 #define MODE1_MOTOR_DEADBAND_STEPS       6.0f
+#define MODE1_STOP_WINDOW_STEPS       35.0f
+#define MODE1_FINAL_MICRO_SPEED_HZ    MODE1_FIXED_SPEED_HZ
 /* Switch early so inertia carries the ball to the requested endpoints. */
 #define MODE1_START_ERROR_PIXELS       12.0f
 #define MODE1_START_VELOCITY           35.0f
@@ -219,11 +219,14 @@ static float Mode1_TargetHeightSteps(void)
 static float Mode1_CalculateMotorSpeed(void)
 {
     float position_error;
-    float max_speed;
     float output;
     float micro_target;
+    float speed_limit;
 
     position_error = Mode1_TargetHeightSteps() - BalanceMotor.Position_Estimate;
+    speed_limit = MODE1_FIXED_SPEED_HZ;
+
+    /* Final hold uses a deliberately smaller correction speed. */
     if (Mode3Phase == MODE3_PHASE_HOLD_MINUS && VisionValid)
     {
         micro_target = -MODE1_FINAL_MICRO_KP *
@@ -233,19 +236,16 @@ static float Mode1_CalculateMotorSpeed(void)
                                   -MODE1_FINAL_MICRO_MAX_STEPS,
                                   MODE1_FINAL_MICRO_MAX_STEPS);
         position_error += micro_target;
+        speed_limit = MODE1_FINAL_MICRO_SPEED_HZ;
     }
-    if (AbsFloat(position_error) <= MODE1_MOTOR_DEADBAND_STEPS)
-        return 0.0f;
-    if (Mode3Phase == MODE3_PHASE_TO_PLUS)
-        max_speed = MODE1_ACCEL_SPEED_HZ;
-    else if (Mode3Phase == MODE3_PHASE_TO_MINUS)
-        max_speed = MODE1_BRAKE_SPEED_HZ;
-    else
-        max_speed = MODE1_LEVEL_SPEED_HZ;
-    output = position_error * MODE1_MOTOR_POSITION_KP;
-    return ClampFloat(output, -max_speed, max_speed);
-}
 
+    /* Run at one fixed high speed; only the commanded step distance changes. */
+    if (AbsFloat(position_error) <= MODE1_STOP_WINDOW_STEPS)
+        return 0.0f;
+
+    output = (position_error > 0.0f) ? speed_limit : -speed_limit;
+    return output;
+}
 static void Mode1_UpdatePhase(void)
 {
     uint32_t phase_elapsed_ms = SystemTickMs - Mode1PhaseStartMs;

@@ -20,7 +20,8 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 - `MODE1_HEIGHT_SIGN`：整套轨迹方向相反时改为 `-1.0f`。
 - `MODE1_ACCEL_HEIGHT_STEPS`：第一段升高量，越大则向 +5 cm 加速越强。
 - `MODE1_BRAKE_HEIGHT_STEPS`：第二段反向倾斜量，绝对值越大则制动和回程越强。
-- `MODE1_ACCEL_SPEED_HZ`、`MODE1_BRAKE_SPEED_HZ`、`MODE1_LEVEL_SPEED_HZ`：三段电机速度上限。
+- `MODE1_FIXED_SPEED_HZ`：模式1所有阶段统一使用的高速；各阶段只改变目标步数。
+- `MODE1_STOP_WINDOW_STEPS`：接近目标位置时停止高速脉冲的步数窗口；最终微调也使用同一高速，只改变目标步数。
 - `MODE1_SWITCH_TO_BRAKE_X`：第一次提前反转坐标；调小会更早制动，调大则更靠近 +5 cm。
 - `MODE1_SWITCH_TO_LEVEL_X`：第二次提前回水平坐标；调大会更早回平，调小则更靠近 -5 cm。
 - `MODE1_FINAL_ERROR_PIXELS`、`MODE1_FINAL_VELOCITY`：判断最终停止的坐标和速度范围。

@@ -3,7 +3,7 @@
 
 /* Motor tuning: one control tick is normally 5 ms. */
 #define TRACK_MIN_SPEED_HZ          16.0f
-#define TRACK_START_SPEED_HZ       400.0f
+#define TRACK_START_SPEED_HZ      6000.0f
 #define TRACK_MAX_SPEED_HZ        6000.0f
 #define TRACK_ACCEL_HZ_PER_S    180000.0f
 #define TRACK_DECEL_HZ_PER_S    240000.0f
@@ -46,6 +46,7 @@ void EMM_Motor_Init(EMM_Motor *motor)
     motor->Step_Frequency = 0.0f;
     motor->Signed_Frequency = 0.0f;
     motor->Position_Estimate = 0.0f;
+    motor->Reverse_Pending = 0;
     EMM_Set_Direction(motor, MOTOR_DIR_CW_UP);
     EMM_Disable(motor);
 }
@@ -60,6 +61,7 @@ void EMM_Disable(EMM_Motor *motor)
     STEP_PWM_SetFreq(0);
     motor->Step_Frequency = 0.0f;
     motor->Signed_Frequency = 0.0f;
+    motor->Reverse_Pending = 0;
     GPIO_SetBits(motor->ENA_Port, motor->ENA_Pin);
 }
 
@@ -68,6 +70,7 @@ void EMM_Hold(EMM_Motor *motor)
     STEP_PWM_SetFreq(0);
     motor->Step_Frequency = 0.0f;
     motor->Signed_Frequency = 0.0f;
+    motor->Reverse_Pending = 0;
     EMM_Enable(motor);
 }
 
@@ -114,7 +117,7 @@ void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
     accel_step = TRACK_ACCEL_HZ_PER_S * dt_s;
     decel_step = TRACK_DECEL_HZ_PER_S * dt_s;
 
-    /* Hard-stop STEP and change DIR; the next 5 ms tick restarts the pulses. */
+    /* Stop STEP and change DIR; the next tick restarts directly at target speed. */
     if (current != 0.0f && target != 0.0f &&
         ((current > 0.0f) != (target > 0.0f)))
     {
@@ -122,6 +125,7 @@ void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
         desired_direction = (target > 0.0f) ?
                             MOTOR_DIR_CW_UP : MOTOR_DIR_CCW_DOWN;
         EMM_Set_Direction(motor, desired_direction);
+        motor->Reverse_Pending = 1;
         return;
     }
 
@@ -147,18 +151,20 @@ void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
     if (current == 0.0f && desired_direction != motor->Direction)
     {
         EMM_Set_Direction(motor, desired_direction);
-        return; /* The next 5 ms tick supplies ample DIR setup time. */
+        motor->Reverse_Pending = 1;
+        return;
     }
 
     if (current == 0.0f)
     {
         float start_speed = AbsFloat(target);
 
-        if (start_speed > TRACK_START_SPEED_HZ)
+        if (!motor->Reverse_Pending && start_speed > TRACK_START_SPEED_HZ)
             start_speed = TRACK_START_SPEED_HZ;
         if (start_speed < TRACK_MIN_SPEED_HZ)
             start_speed = TRACK_MIN_SPEED_HZ;
         next = (target > 0.0f) ? start_speed : -start_speed;
+        motor->Reverse_Pending = 0;
     }
     else if (AbsFloat(target) > AbsFloat(current))
     {

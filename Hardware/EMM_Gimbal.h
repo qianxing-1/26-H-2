@@ -19,6 +19,7 @@ typedef struct
     float Signed_Frequency;
     float Position_Estimate;
     uint8_t Direction;
+    uint8_t Reverse_Pending;
 } EMM_Motor;
 
 typedef struct
