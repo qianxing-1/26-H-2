@@ -1,12 +1,14 @@
 #include "stm32f10x.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include "Serial.h"
 
 uint16_t Serial_RxData;
 uint16_t Serial_RxFlag;
 volatile uint32_t Serial_LastRxMs = 0;
 volatile uint32_t Serial_RxFrameCount = 0;
+volatile int32_t Serial_TargetVelocityCenti = 0;
 
 extern volatile uint16_t x;
 extern volatile uint16_t y;
@@ -104,6 +106,7 @@ uint8_t Serial_GetRxData(void)
 }
 
 void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
+                       int32_t *velocity_centi,
                        uint32_t *last_rx_ms, uint32_t *frame_id)
 {
     uint32_t before;
@@ -119,6 +122,7 @@ void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
         }
         *target_x = x;
         *target_y = y;
+        *velocity_centi = Serial_TargetVelocityCenti;
         *last_rx_ms = Serial_LastRxMs;
         after = Serial_RxFrameCount;
     } while (before != after || (after & 1U));
@@ -129,8 +133,16 @@ void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
 void USART2_IRQHandler(void)
 {
     uint8_t data;
-    static uint16_t rx_value = 0;
-    static uint8_t rx_digits = 0;
+    static uint16_t rx_x_value = 0;
+    static uint8_t rx_x_digits = 0;
+    static int32_t rx_v_integer = 0;
+    static uint8_t rx_v_digits = 0;
+    static uint8_t rx_v_fraction = 0;
+    static uint8_t rx_v_fraction_digits = 0;
+    static int8_t rx_v_sign = 1;
+    static uint8_t rx_field = 0;
+    static uint8_t rx_v_has_digit = 0;
+    static uint8_t rx_v_has_dot = 0;
     static uint8_t rx_invalid = 0;
 
     if (USART_GetITStatus(USART2, USART_IT_RXNE) == RESET)
@@ -142,27 +154,62 @@ void USART2_IRQHandler(void)
     {
         uint8_t digit = data - '0';
 
-        if (rx_digits < 5 &&
-            (rx_value < 6553U ||
-             (rx_value == 6553U && digit <= 5U)))
+        if (rx_field == 0 && rx_x_digits < 5 &&
+            (rx_x_value < 6553U ||
+             (rx_x_value == 6553U && digit <= 5U)))
         {
-            rx_value = (uint16_t)(rx_value * 10U + digit);
-            rx_digits++;
+            rx_x_value = (uint16_t)(rx_x_value * 10U + digit);
+            rx_x_digits++;
+        }
+        else if (rx_field == 1 && !rx_v_has_dot && rx_v_digits < 6)
+        {
+            rx_v_integer = rx_v_integer * 10 + digit;
+            rx_v_digits++;
+            rx_v_has_digit = 1;
+        }
+        else if (rx_field == 1 && rx_v_has_dot &&
+                 rx_v_fraction_digits < 2)
+        {
+            rx_v_fraction = (uint8_t)(rx_v_fraction * 10U + digit);
+            rx_v_fraction_digits++;
+            rx_v_has_digit = 1;
         }
         else
         {
             rx_invalid = 1;
         }
     }
+    else if (data == ',' && rx_field == 0 && rx_x_digits > 0)
+    {
+        rx_field = 1;
+    }
+    else if ((data == '+' || data == '-') && rx_field == 1 &&
+             !rx_v_has_digit && rx_v_digits == 0 &&
+             rx_v_fraction_digits == 0)
+    {
+        rx_v_sign = (data == '-') ? -1 : 1;
+    }
+    else if (data == '.' && rx_field == 1 && !rx_v_has_dot)
+    {
+        rx_v_has_dot = 1;
+    }
     else if (data == '\n' || data == '\r')
     {
-        if (rx_digits > 0)
+        if (rx_x_digits > 0 && rx_field == 1 && rx_v_has_digit)
         {
-            uint16_t x_raw = rx_invalid ? 640U : rx_value;
+            uint16_t x_raw = rx_invalid ? 640U : rx_x_value;
+            int32_t velocity_centi =
+                (int32_t)rx_v_integer * 100 +
+                (rx_v_fraction_digits == 1 ?
+                 (int32_t)rx_v_fraction * 10 :
+                 (int32_t)rx_v_fraction);
+
+            velocity_centi *= rx_v_sign;
 
             Serial_RxFrameCount++; /* Odd: a coordinate update is in progress. */
             x = x_raw;
             y = 0;
+            Serial_TargetVelocityCenti = rx_invalid ? 0 : velocity_centi;
             Gimbal_Target_Offset_X =
                 (x_raw > 0U && x_raw < 640U) ?
                 ((int16_t)x_raw - 320) : 0;
@@ -172,15 +219,31 @@ void USART2_IRQHandler(void)
             Serial_RxFlag = 1;
         }
 
-        rx_value = 0;
-        rx_digits = 0;
+        rx_x_value = 0;
+        rx_x_digits = 0;
+        rx_v_integer = 0;
+        rx_v_digits = 0;
+        rx_v_fraction = 0;
+        rx_v_fraction_digits = 0;
+        rx_v_sign = 1;
+        rx_field = 0;
+        rx_v_has_digit = 0;
+        rx_v_has_dot = 0;
         rx_invalid = 0;
     }
     else
     {
         /* Discard a malformed line and wait for its terminator. */
-        rx_value = 0;
-        rx_digits = 0;
+        rx_x_value = 0;
+        rx_x_digits = 0;
+        rx_v_integer = 0;
+        rx_v_digits = 0;
+        rx_v_fraction = 0;
+        rx_v_fraction_digits = 0;
+        rx_v_sign = 1;
+        rx_field = 0;
+        rx_v_has_digit = 0;
+        rx_v_has_dot = 0;
         rx_invalid = 1;
     }
 }

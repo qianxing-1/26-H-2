@@ -14,6 +14,7 @@ void Serial_Printf(char *format, ...);
 uint8_t Serial_GetRxFlag(void);
 uint8_t Serial_GetRxData(void);
 void Serial_ReadTarget(uint16_t *target_x, uint16_t *target_y,
+                       int32_t *velocity_centi,
                        uint32_t *last_rx_ms, uint32_t *frame_id);
 
 #endif

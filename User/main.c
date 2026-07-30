@@ -17,25 +17,43 @@
 #define DISPLAY_PERIOD_MS             80        // OLEDÆÁÄ»Ë¢ÐÂÖÜÆÚ
 
 /* Æ½ºâ¿ØÖÆPID²ÎÊý£»Êä³öÕýÊý´ú±íµç»úË³Ê±Õë×ª¶¯ */
-#define BALANCE_KP                   6.0f       // PID±ÈÀýÏµÊý
-#define BALANCE_KI                   0.05f      // PID»ý·ÖÏµÊý
-#define BALANCE_KD                   2.20f      // PIDÎ¢·ÖÏµÊý
-#define BALANCE_INTEGRAL_LIMIT     300.0f       // »ý·ÖÏÞ·ù£¬·ÀÖ¹»ý·Ö±¥ºÍ
-#define BALANCE_MAX_SPEED_HZ        1500.0f       // µç»ú×î´óÂö³åÊä³öÆµÂÊ£¬ÏÞÖÆ×î¸ß×ªËÙ
-#define BALANCE_MIN_COMMAND_HZ       24.0f      // µç»ú×îÐ¡¶¯×÷ÆµÂÊ£¬µÍÓÚ¸ÃÖµ²»Êä³ö£¬Ïû³ýÎ¢Èõ¶¶¶¯
-#define BALANCE_POSITION_DEADBAND      4.0f     // Î»ÖÃËÀÇø£¬Îó²îÐ¡ÓÚ¸ÃÖµÍ£Ö¹¿ØÖÆÊä³ö
-#define BALANCE_VELOCITY_DEADBAND     35.0f     // ËÙ¶ÈËÀÇø£¬Ð¡ÇòËÙ¶ÈÐ¡ÓÚ¸ÃÖµÍ£Ö¹¿ØÖÆÊä³ö
-#define BALANCE_MOTOR_SIGN             1.0f     // µç»ú·½Ïò·ûºÅ£¬¿É¡À1ÓÃÀ´·´×ª×ªÏò
-#define BALANCE_PREDICT_TIME_S        0.38f
-#define BALANCE_BRAKE_MIN_VELOCITY    50.0f
+#define BALANCE_KP                   6.0f
+#define BALANCE_KI                   0.0f
+#define BALANCE_KD                   2.20f
+#define BALANCE_INTEGRAL_LIMIT       80.0f
+#define BALANCE_MAX_SPEED_HZ        5000.0f
+#define BALANCE_MIN_COMMAND_HZ       24.0f
+#define BALANCE_POSITION_DEADBAND      4.0f
+#define BALANCE_VELOCITY_DEADBAND     30.0f
+#define BALANCE_MOTOR_SIGN             1.0f
+#define BALANCE_KP_FAR                 8.0f
+#define BALANCE_KP_NEAR                3.2f
+#define BALANCE_KD_FAR                 2.2f
+#define BALANCE_KD_BRAKE               7.0f
+#define BALANCE_MAX_SPEED_NEAR_HZ   2600.0f
+#define BALANCE_MAX_SPEED_MICRO_HZ  1100.0f
+#define BALANCE_NEAR_ERROR_PIXELS     55.0f
+#define BALANCE_BRAKE_ERROR_PIXELS    90.0f
+#define BALANCE_BRAKE_PREDICT_MIN_S    0.12f
+#define BALANCE_BRAKE_PREDICT_MAX_S    0.30f
+#define BALANCE_BRAKE_MIN_VELOCITY    35.0f
+#define BALANCE_CENTER_HOLD_PIXELS     6.0f
+#define BALANCE_CENTER_HOLD_VELOCITY  30.0f
 /* Mode 1 trajectory tuning: 400 steps = 1 mm, about 1745 steps = 1 degree. */
 #define MODE1_HEIGHT_SIGN                1.0f
 #define MODE1_ACCEL_HEIGHT_STEPS      1800.0f
 #define MODE1_BRAKE_HEIGHT_STEPS     -2200.0f
 #define MODE1_LEVEL_HEIGHT_STEPS         0.0f
-#define MODE1_ACCEL_SPEED_HZ          2800.0f
-#define MODE1_BRAKE_SPEED_HZ          3200.0f
-#define MODE1_LEVEL_SPEED_HZ          2600.0f
+#define MODE1_ACCEL_SPEED_HZ          5000.0f
+#define MODE1_BRAKE_SPEED_HZ          5600.0f
+#define MODE1_LEVEL_SPEED_HZ          4500.0f
+#define MODE1_BRAKE_PREDICT_TIME_S       0.24f
+#define MODE1_LEVEL_PREDICT_TIME_S        0.20f
+#define MODE1_PLUS_BRAKE_MARGIN_PIXELS   18.0f
+#define MODE1_MINUS_BRAKE_MARGIN_PIXELS  18.0f
+#define MODE1_FINAL_MICRO_KP               1.8f
+#define MODE1_FINAL_MICRO_KD               0.9f
+#define MODE1_FINAL_MICRO_MAX_STEPS      300.0f
 #define MODE1_MOTOR_POSITION_KP          8.0f
 #define MODE1_MOTOR_DEADBAND_STEPS       6.0f
 /* Switch early so inertia carries the ball to the requested endpoints. */
@@ -79,10 +97,11 @@ static volatile uint8_t Mode3ReachCount = 0;                  // µ½´ïÄ¿±êÎÈ¶¨Ö¡Ê
 static volatile uint16_t BalanceTargetX = BALL_PLUS_5CM_X;    // µ±Ç°¿ØÖÆÄ¿±êXÏñËØ
 static volatile float BallFilteredX = 0.0f;                   // ÂË²¨Ö®ºóÐ¡ÇòX×ø±ê
 static volatile float BallVelocityX = 0.0f;                   // Ð¡ÇòX·½ÏòËÙ¶È£¬ÏñËØÃ¿Ãë
+static volatile float CameraVelocityX = 0.0f;
 static volatile float BalanceErrorX = 0.0f;                   // Î»ÖÃÎó²î=ÂË²¨Ð¡Çò×ø±ê?Ä¿±ê×ø±ê
 static volatile float BalanceSpeedCommand = 0.0f;              // PIDÊä³öµç»ú×ªËÙÖ¸ÁîHz
 static volatile uint32_t Mode3CompleteMs = 0;
-static volatile uint32_t Mode1PhaseStartMs = 0;                 // Mode3ÕûÌ×ÈÎÎñÍê³ÉÊ±¼ä´Á
+static volatile uint32_t Mode1PhaseStartMs = 0;
 
 static uint32_t LastControlFrameId = 0;        // ÉÏÒ»´ÎÒÑ¾­´¦Àí¹ýµÄÊÓ¾õÖ¡ID£¬·ÀÖ¹ÖØ¸´´¦ÀíÍ¬Ò»Ö¡
 static uint32_t LastSampleMs = 0;              // ÉÏÒ»´Î²ÉÑùÐ¡ÇòÎ»ÖÃÊ±¼ä´Áms
@@ -144,6 +163,7 @@ static void Balance_ResetEstimator(void)
     LastFilteredX = 0.0f;
     BallFilteredX = 0.0f;
     BallVelocityX = 0.0f;
+    CameraVelocityX = 0.0f;
     BalanceErrorX = 0.0f;
     BalanceSpeedCommand = 0.0f;
     PID_Reset(&BalancePID);   // Çå¿ÕPID»ý·Ö¡¢Î¢·ÖÏî
@@ -201,7 +221,19 @@ static float Mode1_CalculateMotorSpeed(void)
     float position_error;
     float max_speed;
     float output;
+    float micro_target;
+
     position_error = Mode1_TargetHeightSteps() - BalanceMotor.Position_Estimate;
+    if (Mode3Phase == MODE3_PHASE_HOLD_MINUS && VisionValid)
+    {
+        micro_target = -MODE1_FINAL_MICRO_KP *
+                       (BallFilteredX - (float)BALL_MINUS_5CM_X) -
+                       MODE1_FINAL_MICRO_KD * BallVelocityX;
+        micro_target = ClampFloat(micro_target,
+                                  -MODE1_FINAL_MICRO_MAX_STEPS,
+                                  MODE1_FINAL_MICRO_MAX_STEPS);
+        position_error += micro_target;
+    }
     if (AbsFloat(position_error) <= MODE1_MOTOR_DEADBAND_STEPS)
         return 0.0f;
     if (Mode3Phase == MODE3_PHASE_TO_PLUS)
@@ -217,11 +249,10 @@ static float Mode1_CalculateMotorSpeed(void)
 static void Mode1_UpdatePhase(void)
 {
     uint32_t phase_elapsed_ms = SystemTickMs - Mode1PhaseStartMs;
-
+    float predicted_x;
     if (Mode3Phase == MODE1_PHASE_WAIT_START)
     {
-        if (AbsFloat(BallFilteredX - (float)BALL_CENTER_X) <=
-                MODE1_START_ERROR_PIXELS &&
+        if (AbsFloat(BallFilteredX - (float)BALL_CENTER_X) <= MODE1_START_ERROR_PIXELS &&
             AbsFloat(BallVelocityX) <= MODE1_START_VELOCITY)
         {
             Mode3Phase = MODE3_PHASE_TO_PLUS;
@@ -230,10 +261,11 @@ static void Mode1_UpdatePhase(void)
         }
         return;
     }
-
     if (Mode3Phase == MODE3_PHASE_TO_PLUS)
     {
-        if ((BallFilteredX >= MODE1_SWITCH_TO_BRAKE_X &&
+        predicted_x = BallFilteredX + BallVelocityX * MODE1_BRAKE_PREDICT_TIME_S;
+        if ((((BallFilteredX >= MODE1_SWITCH_TO_BRAKE_X) ||
+              (predicted_x >= (float)BALL_PLUS_5CM_X - MODE1_PLUS_BRAKE_MARGIN_PIXELS)) &&
              BallVelocityX >= MODE1_SWITCH_MIN_VELOCITY) ||
             phase_elapsed_ms >= MODE1_ACCEL_TIMEOUT_MS)
         {
@@ -246,7 +278,9 @@ static void Mode1_UpdatePhase(void)
     }
     if (Mode3Phase == MODE3_PHASE_TO_MINUS)
     {
-        if ((BallFilteredX <= MODE1_SWITCH_TO_LEVEL_X &&
+        predicted_x = BallFilteredX + BallVelocityX * MODE1_LEVEL_PREDICT_TIME_S;
+        if ((((BallFilteredX <= MODE1_SWITCH_TO_LEVEL_X) ||
+              (predicted_x <= (float)BALL_MINUS_5CM_X + MODE1_MINUS_BRAKE_MARGIN_PIXELS)) &&
              BallVelocityX <= -MODE1_SWITCH_MIN_VELOCITY) ||
             phase_elapsed_ms >= MODE1_BRAKE_TIMEOUT_MS)
         {
@@ -257,21 +291,17 @@ static void Mode1_UpdatePhase(void)
         }
         return;
     }
-    if (AbsFloat(BallFilteredX - (float)BALL_MINUS_5CM_X) <=
-            MODE1_FINAL_ERROR_PIXELS &&
+    if (AbsFloat(BallFilteredX - (float)BALL_MINUS_5CM_X) <= MODE1_FINAL_ERROR_PIXELS &&
         AbsFloat(BallVelocityX) <= MODE1_FINAL_VELOCITY)
     {
         if (Mode3ReachCount < MODE1_FINAL_STABLE_FRAMES)
             Mode3ReachCount++;
     }
     else
-    {
         Mode3ReachCount = 0;
-    }
     if (Mode3ReachCount >= MODE1_FINAL_STABLE_FRAMES && Mode3CompleteMs == 0)
         Mode3CompleteMs = SystemTickMs;
 }
-
 /**
  * @brief ´¦ÀíÒ»Ö¡ÐÂÊÓ¾õÊý¾Ý£ºÂË²¨¡¢ËÙ¶È¹ÀËã¡¢×´Ì¬»ú¡¢PIDÔËËã
  * @param target_x Ô­Ê¼Ð¡ÇòXÏñËØ
@@ -279,13 +309,15 @@ static void Mode1_UpdatePhase(void)
  * @param sample_ms ½ÓÊÕ¸ÃÖ¡Ê±¼ä´Áms
  */
 static void Balance_ProcessNewFrame(uint16_t target_x,
-                                    uint32_t frame_id, uint32_t sample_ms)
+                                     int32_t velocity_centi,
+                                     uint32_t frame_id, uint32_t sample_ms)
 {
     float raw_x = (float)target_x;
     float dt_s = 0.01f;
     float delta;
     float alpha;
     float measured_velocity = 0.0f;
+    float camera_velocity;
     float output;
     float control_error;
 
@@ -300,7 +332,10 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
         VisionValid = 1;
         BallFilteredX = raw_x;
         LastFilteredX = raw_x;
-        BallVelocityX = 0.0f;
+        CameraVelocityX = ClampFloat((float)velocity_centi * 0.01f,
+                                         -MAX_MEASURED_VELOCITY,
+                                         MAX_MEASURED_VELOCITY);
+        BallVelocityX = CameraVelocityX;
         LastSampleMs = sample_ms;
     }
     else
@@ -323,7 +358,13 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
                                        -MAX_MEASURED_VELOCITY,
                                        MAX_MEASURED_VELOCITY);
         // ËÙ¶È×öÒ»½×µÍÍ¨ÂË²¨
-        BallVelocityX += (measured_velocity - BallVelocityX) *
+        camera_velocity = ClampFloat((float)velocity_centi * 0.01f,
+                                      -MAX_MEASURED_VELOCITY,
+                                      MAX_MEASURED_VELOCITY);
+        CameraVelocityX += (camera_velocity - CameraVelocityX) *
+                          VELOCITY_FILTER_ALPHA;
+        BallVelocityX += (((CameraVelocityX * 0.75f) +
+                          (measured_velocity * 0.25f)) - BallVelocityX) *
                          VELOCITY_FILTER_ALPHA;
 
         LastFilteredX = BallFilteredX;
@@ -338,34 +379,55 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
     /* Mode 1 uses its own three-stage motor position trajectory. */
     if (CurrentMode == MODE_REQUIREMENT_3)
         return;
-    control_error = BalanceErrorX;
-
-    /* Predict crossing only while the ball is moving toward the target. */
-    if (BalanceErrorX * BallVelocityX < 0.0f &&
-        AbsFloat(BallVelocityX) >= BALANCE_BRAKE_MIN_VELOCITY)
     {
-        control_error += BallVelocityX * BALANCE_PREDICT_TIME_S;
+        float abs_error = AbsFloat(BalanceErrorX);
+        float abs_velocity = AbsFloat(BallVelocityX);
+        float prediction_time;
+        float speed_limit;
+        uint8_t moving_to_center = (BalanceErrorX * BallVelocityX < 0.0f) &&
+                                    (abs_velocity >= BALANCE_BRAKE_MIN_VELOCITY);
+        if (abs_error >= BALANCE_BRAKE_ERROR_PIXELS)
+        {
+            BalancePID.Kp = BALANCE_KP_FAR;
+            BalancePID.Kd = BALANCE_KD_FAR;
+            speed_limit = BALANCE_MAX_SPEED_HZ;
+        }
+        else if (abs_error >= BALANCE_NEAR_ERROR_PIXELS)
+        {
+            BalancePID.Kp = BALANCE_KP;
+            BalancePID.Kd = BALANCE_KD_FAR;
+            speed_limit = BALANCE_MAX_SPEED_NEAR_HZ;
+        }
+        else
+        {
+            BalancePID.Kp = BALANCE_KP_NEAR;
+            BalancePID.Kd = BALANCE_KD_BRAKE;
+            speed_limit = BALANCE_MAX_SPEED_MICRO_HZ;
+        }
+        control_error = BalanceErrorX;
+        if (moving_to_center)
+        {
+            prediction_time = ClampFloat(BALANCE_BRAKE_PREDICT_MIN_S +
+                                          abs_velocity * 0.00008f,
+                                          BALANCE_BRAKE_PREDICT_MIN_S,
+                                          BALANCE_BRAKE_PREDICT_MAX_S);
+            control_error += BallVelocityX * prediction_time;
+            BalancePID.Kd = BALANCE_KD_BRAKE;
+        }
+        if (abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
+            abs_velocity <= BALANCE_CENTER_HOLD_VELOCITY)
+        {
+            BalancePID.Integral *= 0.80f;
+            BalanceSpeedCommand = 0.0f;
+            return;
+        }
+        output = PID_Calculate(&BalancePID, control_error, BallVelocityX, dt_s);
+        output = ClampFloat(output, -speed_limit, speed_limit);
+        output *= BALANCE_MOTOR_SIGN;
+        if (AbsFloat(output) < BALANCE_MIN_COMMAND_HZ)
+            output = 0.0f;
+        BalanceSpeedCommand = output;
     }
-
-    // ½øÈëËÀÇø£ºÎ»ÖÃ¡¢ËÙ¶È¶¼ºÜÐ¡£¬Í£Ö¹Êä³ö£¬»ý·Ö×öË¥¼õÒÖÖÆ±¥ºÍ
-    if (AbsFloat(BalanceErrorX) <= BALANCE_POSITION_DEADBAND &&
-        AbsFloat(BallVelocityX) <= BALANCE_VELOCITY_DEADBAND)
-    {
-        BalancePID.Integral *= 0.85f;
-        BalanceSpeedCommand = 0.0f;
-        return;
-    }
-
-    /* DÖ±½ÓÊ¹ÓÃÐ¡Çò²âÁ¿ËÙ¶È£¬ÇÐ»»Ä¿±ê²»»á²úÉúÎ¢·Ö³å»÷ */
-    output = PID_Calculate(&BalancePID, control_error,
-                           BallVelocityX, dt_s);
-    output *= BALANCE_MOTOR_SIGN;
-
-    // Ð¡ÓÚ×îÐ¡Êä³öãÐÖµÖ±½ÓÇåÁã£¬Ïû³ýµç»úÎ¢Èõ¶¶¶¯
-    if (AbsFloat(output) < BALANCE_MIN_COMMAND_HZ)
-        output = 0.0f;
-
-    BalanceSpeedCommand = output;
 }
 
 /**
@@ -375,16 +437,18 @@ static void Balance_ControlTick(void)
 {
     uint16_t target_x;
     uint16_t target_y;
+    int32_t velocity_centi;
     uint32_t last_rx_ms;
     uint32_t frame_id;
 
-    Serial_ReadTarget(&target_x, &target_y, &last_rx_ms, &frame_id);
+    Serial_ReadTarget(&target_x, &target_y, &velocity_centi,
+                       &last_rx_ms, &frame_id);
     (void)target_y; // Y×ø±ê±¾³ÌÐòÃ»ÓÐÊ¹ÓÃ
 
     if (TargetIsFresh(target_x, last_rx_ms))
     {
         if (frame_id != LastControlFrameId)   // Ö»´¦ÀíÃ»ÓÐ´¦Àí¹ýµÄÐÂÖ¡
-            Balance_ProcessNewFrame(target_x, frame_id, last_rx_ms);
+            Balance_ProcessNewFrame(target_x, velocity_centi, frame_id, last_rx_ms);
     }
     else
     {
