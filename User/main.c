@@ -7,9 +7,9 @@
 #include "EMM_Gimbal.h"
 
 /* 相机坐标以及±5cm任务像素标定 */
-#define BALL_CENTER_X                286        // 小球处于中心位置对应的相机X像素
-#define BALL_PLUS_5CM_X              425  // 小球向右偏移+5cm目标像素
-#define BALL_MINUS_5CM_X             138  // 小球向左偏移?5cm目标像素
+#define BALL_CENTER_X                333        // 小球处于中心位置对应的相机X像素
+#define BALL_PLUS_5CM_X              496  // 小球向右偏移+5cm目标像素
+#define BALL_MINUS_5CM_X             170  // 小球向左偏移?5cm目标像素
 #define BALL_COORDINATE_MAX          640        // 相机X轴像素最大值
 
 #define CONTROL_PERIOD_MS              5        // 控制循环周期 5ms
@@ -17,20 +17,27 @@
 #define DISPLAY_PERIOD_MS             80        // OLED屏幕刷新周期
 
 /* Position/velocity cascade tuning; positive target steps command CW/up. */
-#define BALANCE_POSITION_VEL_KP_FAR    2.4f
-#define BALANCE_POSITION_VEL_KP_NEAR   0.9f
-#define BALANCE_DESIRED_VELOCITY_MAX 650.0f
-#define BALANCE_VELOCITY_STEP_KP       4.5f
-#define BALANCE_POSITION_INTEGRAL_KI   2.0f
-#define BALANCE_GAIN_SCHEDULE_PIXELS 100.0f
+#define BALANCE_POSITION_VEL_KP_FAR     8.0f
+#define BALANCE_POSITION_VEL_KP_NEAR    0.15f
+#define BALANCE_DESIRED_VELOCITY_MAX  800.0f
+#define BALANCE_ACCEL_STEP_KP            4.8f
+#define BALANCE_BRAKE_STEP_KP            8.0f
+#define BALANCE_BRAKE_PREDICT_TIME_S     0.40f
+#define BALANCE_BRAKE_MIN_VELOCITY      70.0f
+#define BALANCE_BRAKE_RELEASE_VELOCITY  40.0f
+#define BALANCE_BRAKE_HOLD_FRAMES           4
+#define BALANCE_BRAKE_MIN_TARGET_STEPS 1400.0f
+#define BALANCE_BRAKE_TARGET_ALPHA       1.00f
+#define BALANCE_POSITION_INTEGRAL_KI   0.0f
+#define BALANCE_GAIN_SCHEDULE_PIXELS 320.0f
 #define BALANCE_INTEGRAL_ZONE_PIXELS  45.0f
 #define BALANCE_INTEGRAL_MAX_STEPS   260.0f
-#define BALANCE_TARGET_LIMIT_STEPS  2600.0f
-#define BALANCE_TARGET_FILTER_ALPHA    0.72f
-#define BALANCE_MOTOR_FIXED_SPEED_HZ 8500.0f
-#define BALANCE_MOTOR_STOP_WINDOW_STEPS 55.0f
-#define BALANCE_CENTER_HOLD_PIXELS      4.0f
-#define BALANCE_CENTER_HOLD_VELOCITY   22.0f
+#define BALANCE_TARGET_LIMIT_STEPS  3000.0f
+#define BALANCE_TARGET_FILTER_ALPHA    0.75f
+#define BALANCE_MOTOR_FIXED_SPEED_HZ 9000.0f
+#define BALANCE_MOTOR_STOP_WINDOW_STEPS 160.0f
+#define BALANCE_CENTER_HOLD_PIXELS      8.0f
+#define BALANCE_CENTER_HOLD_VELOCITY   70.0f
 #define BALANCE_MOTOR_SIGN              1.0f
 /* Mode 1 trajectory tuning: 400 steps = 1 mm, about 1745 steps = 1 degree. */
 #define MODE1_HEIGHT_SIGN                1.0f
@@ -58,7 +65,7 @@
 #define POSITION_FILTER_ALPHA_NEAR    0.48f    // 小球位置变化小时，滤波系数，数值越小滤波越强
 #define POSITION_FILTER_ALPHA_FAR     0.78f    // 小球位置变化大时，滤波系数，响应更快
 #define POSITION_FILTER_FAR_PIXELS   12.0f     // 像素变化超过该阈值切换快速滤波
-#define VELOCITY_FILTER_ALPHA         0.60f    // 小球速度一阶低通滤波系数
+#define VELOCITY_FILTER_ALPHA         0.30f    // 小球速度一阶低通滤波系数
 #define MAX_MEASURED_VELOCITY       2500.0f     // 小球测量速度最大限幅，抑制异常跳变
 
 /* 任务模式3要求：先到达+5cm，再反向稳定到?5cm */
@@ -89,6 +96,8 @@ static volatile float BalanceErrorX = 0.0f;                   // 位置误差=滤波小
 static volatile float BalanceSpeedCommand = 0.0f;              // Final signed motor frequency command in Hz
 static volatile float BalanceTargetSteps = 0.0f;
 static volatile float BalanceIntegralSteps = 0.0f;
+static volatile uint8_t BalanceBrakeHoldFrames = 0;
+static volatile int8_t BalanceBrakeDirection = 0;
 static volatile uint32_t Mode3CompleteMs = 0;
 static volatile uint32_t Mode1PhaseStartMs = 0;
 
@@ -156,6 +165,8 @@ static void Balance_ResetEstimator(void)
     BalanceSpeedCommand = 0.0f;
     BalanceTargetSteps = 0.0f;
     BalanceIntegralSteps = 0.0f;
+    BalanceBrakeHoldFrames = 0;
+    BalanceBrakeDirection = 0;
 }
 
 /**
@@ -219,25 +230,74 @@ static float PositionServo_CalculateSpeed(float target_steps,
 static void Balance_UpdateTargetPosition(float dt_s)
 {
     float abs_error = AbsFloat(BalanceErrorX);
+    float predicted_error;
+    float predicted_abs_error;
     float gain_ratio;
     float position_velocity_kp;
     float desired_velocity;
     float velocity_error;
+    float control_effort;
+    float step_gain;
     float raw_target;
     float alpha = BALANCE_TARGET_FILTER_ALPHA;
+    uint8_t brake_request;
+    uint8_t braking = 0;
+    int8_t motion_direction = 0;
 
-    gain_ratio = ClampFloat(abs_error / BALANCE_GAIN_SCHEDULE_PIXELS,
+    /* Predict the ball position after camera, motor and linkage delay. */
+    predicted_error = BalanceErrorX +
+        BallVelocityX * BALANCE_BRAKE_PREDICT_TIME_S;
+    predicted_error = ClampFloat(predicted_error,
+                                 -(float)BALL_COORDINATE_MAX,
+                                 (float)BALL_COORDINATE_MAX);
+    predicted_abs_error = AbsFloat(predicted_error);
+
+    gain_ratio = ClampFloat(predicted_abs_error /
+                            BALANCE_GAIN_SCHEDULE_PIXELS,
                             0.0f, 1.0f);
     position_velocity_kp = BALANCE_POSITION_VEL_KP_NEAR +
         (BALANCE_POSITION_VEL_KP_FAR -
          BALANCE_POSITION_VEL_KP_NEAR) * gain_ratio;
 
-    /* The desired ball speed always points from its position to the target. */
-    desired_velocity = -position_velocity_kp * BalanceErrorX;
+    /* Prediction lowers and reverses the speed reference before arrival. */
+    desired_velocity = -position_velocity_kp * predicted_error;
     desired_velocity = ClampFloat(desired_velocity,
                                   -BALANCE_DESIRED_VELOCITY_MAX,
                                   BALANCE_DESIRED_VELOCITY_MAX);
     velocity_error = desired_velocity - BallVelocityX;
+    control_effort = -velocity_error;
+
+    if (BallVelocityX > 0.0f)
+        motion_direction = 1;
+    else if (BallVelocityX < 0.0f)
+        motion_direction = -1;
+
+    /* Control effort with the same sign as velocity produces braking tilt. */
+    brake_request =
+        (AbsFloat(BallVelocityX) >= BALANCE_BRAKE_MIN_VELOCITY &&
+         control_effort * BallVelocityX > 0.0f);
+
+    if (brake_request)
+    {
+        BalanceBrakeHoldFrames = BALANCE_BRAKE_HOLD_FRAMES;
+        BalanceBrakeDirection = motion_direction;
+        braking = 1;
+    }
+    else if (BalanceBrakeHoldFrames > 0 &&
+             AbsFloat(BallVelocityX) >= BALANCE_BRAKE_RELEASE_VELOCITY &&
+             motion_direction == BalanceBrakeDirection)
+    {
+        BalanceBrakeHoldFrames--;
+        braking = 1;
+    }
+    else
+    {
+        BalanceBrakeHoldFrames = 0;
+        BalanceBrakeDirection = 0;
+    }
+
+    step_gain = braking ? BALANCE_BRAKE_STEP_KP :
+                           BALANCE_ACCEL_STEP_KP;
 
     if (abs_error <= BALANCE_INTEGRAL_ZONE_PIXELS)
     {
@@ -252,7 +312,9 @@ static void Balance_UpdateTargetPosition(float dt_s)
         BalanceIntegralSteps *= 0.85f;
     }
 
-    if (abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
+    if (!braking &&
+        abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
+        predicted_abs_error <= BALANCE_CENTER_HOLD_PIXELS &&
         AbsFloat(BallVelocityX) <= BALANCE_CENTER_HOLD_VELOCITY)
     {
         /* Keep the learned level offset instead of discarding static bias. */
@@ -260,12 +322,17 @@ static void Balance_UpdateTargetPosition(float dt_s)
     }
     else
     {
-        /*
-         * If the ball moves toward the target faster than desired,
-         * velocity_error changes sign before arrival and reverses the tilt.
-         */
-        raw_target = -BALANCE_VELOCITY_STEP_KP * velocity_error +
-                     BalanceIntegralSteps;
+        if (braking && control_effort * (float)BalanceBrakeDirection <= 0.0f)
+            control_effort = (float)BalanceBrakeDirection *
+                             AbsFloat(control_effort);
+        raw_target = step_gain * control_effort + BalanceIntegralSteps;
+
+        if (braking &&
+            AbsFloat(raw_target) < BALANCE_BRAKE_MIN_TARGET_STEPS)
+        {
+            raw_target = (float)BalanceBrakeDirection *
+                         BALANCE_BRAKE_MIN_TARGET_STEPS;
+        }
     }
 
     raw_target *= BALANCE_MOTOR_SIGN;
@@ -273,7 +340,9 @@ static void Balance_UpdateTargetPosition(float dt_s)
                             -BALANCE_TARGET_LIMIT_STEPS,
                             BALANCE_TARGET_LIMIT_STEPS);
 
-    /* A braking reversal must not be delayed by target filtering. */
+    /* Braking target changes and direction reversals must take effect now. */
+    if (braking)
+        alpha = BALANCE_BRAKE_TARGET_ALPHA;
     if (raw_target * BalanceTargetSteps < 0.0f)
         alpha = 1.0f;
 
