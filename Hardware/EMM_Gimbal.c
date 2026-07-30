@@ -4,8 +4,8 @@
 /* Motor tuning: one control tick is normally 5 ms. */
 #define TRACK_MIN_SPEED_HZ          16.0f
 #define TRACK_START_SPEED_HZ       100.0f
-#define TRACK_MAX_SPEED_HZ        1500.0f
-#define TRACK_ACCEL_HZ_PER_S     60000.0f
+#define TRACK_MAX_SPEED_HZ        3200.0f
+#define TRACK_ACCEL_HZ_PER_S    100000.0f
 #define TRACK_DECEL_HZ_PER_S    120000.0f
 
 /* Relative pulse limit from the level power-up position; tune to the linkage. */

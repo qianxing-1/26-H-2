@@ -5,12 +5,25 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 
 - PC14：切换要求3、要求4/5两个模式；运行中按下会先停止。
 - PC15：启动当前模式。
-- 模式1（要求3）：中心 -> +5 cm -> -5 cm，随后持续稳定在 -5 cm。
+- 模式1（要求3）：从水平中心出发，依次执行升高加速、反向倾斜制动、回到水平滑行，在 -5 cm 附近停止。
 - 模式2（要求4/5）：持续稳定在中心坐标320。
 
-当前临时标定为中心320、+5 cm=520、-5 cm=120。控制、滤波和步进电机
+当前标定为中心286、+5 cm=425、-5 cm=138。控制、滤波和步进电机
 参数集中在 `User/main.c` 与 `Hardware/EMM_Gimbal.c` 文件顶部。
 如果实际DIR接线与当前约定相反，只需把 `BALANCE_MOTOR_SIGN` 改为 `-1.0f`。
+
+## 模式1调参
+
+上电前必须把管道调到水平并将小球放在中心。模式1把启动时的位置作为零点，
+按目标脉冲位置运行；400脉冲约等于丝杆1 mm，1745脉冲约等于管道1度。
+
+- `MODE1_HEIGHT_SIGN`：整套轨迹方向相反时改为 `-1.0f`。
+- `MODE1_ACCEL_HEIGHT_STEPS`：第一段升高量，越大则向 +5 cm 加速越强。
+- `MODE1_BRAKE_HEIGHT_STEPS`：第二段反向倾斜量，绝对值越大则制动和回程越强。
+- `MODE1_ACCEL_SPEED_HZ`、`MODE1_BRAKE_SPEED_HZ`、`MODE1_LEVEL_SPEED_HZ`：三段电机速度上限。
+- `MODE1_SWITCH_TO_BRAKE_X`：第一次提前反转坐标；调小会更早制动，调大则更靠近 +5 cm。
+- `MODE1_SWITCH_TO_LEVEL_X`：第二次提前回水平坐标；调大会更早回平，调小则更靠近 -5 cm。
+- `MODE1_FINAL_ERROR_PIXELS`、`MODE1_FINAL_VELOCITY`：判断最终停止的坐标和速度范围。
 
 ## 串口协议
 
