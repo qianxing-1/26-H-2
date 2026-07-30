@@ -21,14 +21,14 @@
 #define BALANCE_POSITION_VEL_KP_NEAR    0.15f
 #define BALANCE_DESIRED_VELOCITY_MAX  800.0f
 #define BALANCE_ACCEL_STEP_KP            4.8f
-#define BALANCE_BRAKE_STEP_KP            8.0f
-#define BALANCE_BRAKE_PREDICT_TIME_S     0.40f
+#define BALANCE_BRAKE_STEP_KP            12.0f
+#define BALANCE_BRAKE_PREDICT_TIME_S     0.55f
 #define BALANCE_BRAKE_MIN_VELOCITY      70.0f
 #define BALANCE_BRAKE_RELEASE_VELOCITY  40.0f
 #define BALANCE_BRAKE_HOLD_FRAMES           4
-#define BALANCE_BRAKE_MIN_TARGET_STEPS 1400.0f
+#define BALANCE_BRAKE_MIN_TARGET_STEPS 800.0f
 #define BALANCE_BRAKE_TARGET_ALPHA       1.00f
-#define BALANCE_POSITION_INTEGRAL_KI   0.0f
+#define BALANCE_POSITION_INTEGRAL_KI   0.5f
 #define BALANCE_GAIN_SCHEDULE_PIXELS 320.0f
 #define BALANCE_INTEGRAL_ZONE_PIXELS  45.0f
 #define BALANCE_INTEGRAL_MAX_STEPS   260.0f
@@ -39,28 +39,11 @@
 #define BALANCE_CENTER_HOLD_PIXELS      8.0f
 #define BALANCE_CENTER_HOLD_VELOCITY   70.0f
 #define BALANCE_MOTOR_SIGN              1.0f
-/* Mode 1 trajectory tuning: 400 steps = 1 mm, about 1745 steps = 1 degree. */
-#define MODE1_HEIGHT_SIGN                1.0f
-#define MODE1_ACCEL_HEIGHT_STEPS      1800.0f
-#define MODE1_BRAKE_HEIGHT_STEPS     -2200.0f
-#define MODE1_LEVEL_HEIGHT_STEPS         0.0f
-#define MODE1_FIXED_SPEED_HZ          5200.0f
-#define MODE1_BRAKE_PREDICT_TIME_S       0.24f
-#define MODE1_LEVEL_PREDICT_TIME_S        0.20f
-#define MODE1_PLUS_BRAKE_MARGIN_PIXELS   18.0f
-#define MODE1_MINUS_BRAKE_MARGIN_PIXELS  18.0f
-#define MODE1_STOP_WINDOW_STEPS       35.0f
-/* Switch early so inertia carries the ball to the requested endpoints. */
-#define MODE1_START_ERROR_PIXELS       12.0f
-#define MODE1_START_VELOCITY           35.0f
-#define MODE1_SWITCH_TO_BRAKE_X       385.0f
-#define MODE1_SWITCH_TO_LEVEL_X       185.0f
-#define MODE1_SWITCH_MIN_VELOCITY      20.0f
-#define MODE1_FINAL_ERROR_PIXELS        8.0f
-#define MODE1_FINAL_VELOCITY           35.0f
-#define MODE1_FINAL_STABLE_FRAMES         8
-#define MODE1_ACCEL_TIMEOUT_MS         3000
-#define MODE1_BRAKE_TIMEOUT_MS         3000
+/* Requirement 3 point-to-point tuning; both legs use the balance controller. */
+#define MODE3_PLUS_REACH_PIXELS       15.0f
+#define MODE3_FINAL_ERROR_PIXELS       8.0f
+#define MODE3_FINAL_VELOCITY          35.0f
+#define MODE3_FINAL_STABLE_FRAMES         8
 /* STM32端滤波，抑制相机单像素抖动；大小跳变使用不同滤波系数 */
 #define POSITION_FILTER_ALPHA_NEAR    0.48f    // 小球位置变化小时，滤波系数，数值越小滤波越强
 #define POSITION_FILTER_ALPHA_FAR     0.78f    // 小球位置变化大时，滤波系数，响应更快
@@ -72,7 +55,6 @@
 #define MODE_REQUIREMENT_3               1     // 模式3：+5cm再到?5cm往复任务
 #define MODE_REQUIREMENT_4_5             2     // 模式4/5：小球保持在中心
 
-#define MODE1_PHASE_WAIT_START            3
 #define MODE3_PHASE_TO_PLUS              0     // 模式3状态：运动到+5cm
 #define MODE3_PHASE_TO_MINUS             1     // 模式3状态：运动到?5cm
 #define MODE3_PHASE_HOLD_MINUS           2     // 模式3状态：稳定保持?5cm
@@ -99,7 +81,6 @@ static volatile float BalanceIntegralSteps = 0.0f;
 static volatile uint8_t BalanceBrakeHoldFrames = 0;
 static volatile int8_t BalanceBrakeDirection = 0;
 static volatile uint32_t Mode3CompleteMs = 0;
-static volatile uint32_t Mode1PhaseStartMs = 0;
 
 static uint32_t LastControlFrameId = 0;        // 上一次已经处理过的视觉帧ID，防止重复处理同一帧
 static uint32_t LastSampleMs = 0;              // 上一次采样小球位置时间戳ms
@@ -177,14 +158,12 @@ static void Balance_Start(void)
     __disable_irq();
     ControlEnabled = 0;
     Mode3CompleteMs = 0;
-    Mode1PhaseStartMs = SystemTickMs;
     Mode3ReachCount = 0;
-    Mode3Phase = MODE1_PHASE_WAIT_START;
-    BalanceTargetX = BALL_CENTER_X;
-    if (CurrentMode == MODE_REQUIREMENT_3)
-        BalanceMotor.Position_Estimate = 0.0f;
+    Mode3Phase = MODE3_PHASE_TO_PLUS;
+    BalanceTargetX = (CurrentMode == MODE_REQUIREMENT_3) ?
+                     BALL_PLUS_5CM_X : BALL_CENTER_X;
     Balance_ResetEstimator();
-    EMM_Hold(&BalanceMotor);        // 电机锁止保持
+    EMM_Hold(&BalanceMotor);        // Keep the current pipe position while starting.
     ControlEnabled = 1;
     __enable_irq();
 }
@@ -199,21 +178,6 @@ static void Balance_Stop(void)
     Balance_ResetEstimator();
     EMM_Hold(&BalanceMotor);
     __enable_irq();
-}
-
-/**
- * @brief Mode3状态机跳转判断，满足条件切换下一阶段
- */
-static float Mode1_TargetHeightSteps(void)
-{
-    float target;
-    if (Mode3Phase == MODE3_PHASE_TO_PLUS)
-        target = MODE1_ACCEL_HEIGHT_STEPS;
-    else if (Mode3Phase == MODE3_PHASE_TO_MINUS)
-        target = MODE1_BRAKE_HEIGHT_STEPS;
-    else
-        target = MODE1_LEVEL_HEIGHT_STEPS;
-    return target * MODE1_HEIGHT_SIGN;
 }
 
 static float PositionServo_CalculateSpeed(float target_steps,
@@ -350,62 +314,45 @@ static void Balance_UpdateTargetPosition(float dt_s)
         (raw_target - BalanceTargetSteps) * alpha;
 }
 
-static void Mode1_UpdatePhase(void)
+static void Mode3_UpdatePhase(void)
 {
-    uint32_t phase_elapsed_ms = SystemTickMs - Mode1PhaseStartMs;
-    float predicted_x;
-    if (Mode3Phase == MODE1_PHASE_WAIT_START)
-    {
-        if (AbsFloat(BallFilteredX - (float)BALL_CENTER_X) <= MODE1_START_ERROR_PIXELS &&
-            AbsFloat(BallVelocityX) <= MODE1_START_VELOCITY)
-        {
-            Mode3Phase = MODE3_PHASE_TO_PLUS;
-            BalanceTargetX = BALL_PLUS_5CM_X;
-            Mode1PhaseStartMs = SystemTickMs;
-        }
-        return;
-    }
     if (Mode3Phase == MODE3_PHASE_TO_PLUS)
     {
-        predicted_x = BallFilteredX + BallVelocityX * MODE1_BRAKE_PREDICT_TIME_S;
-        if ((((BallFilteredX >= MODE1_SWITCH_TO_BRAKE_X) ||
-              (predicted_x >= (float)BALL_PLUS_5CM_X - MODE1_PLUS_BRAKE_MARGIN_PIXELS)) &&
-             BallVelocityX >= MODE1_SWITCH_MIN_VELOCITY) ||
-            phase_elapsed_ms >= MODE1_ACCEL_TIMEOUT_MS)
+        if (AbsFloat(BallFilteredX - (float)BALL_PLUS_5CM_X) <=
+            MODE3_PLUS_REACH_PIXELS)
         {
             Mode3Phase = MODE3_PHASE_TO_MINUS;
             BalanceTargetX = BALL_MINUS_5CM_X;
-            Mode1PhaseStartMs = SystemTickMs;
             Mode3ReachCount = 0;
+            BalanceIntegralSteps = 0.0f;
+            BalanceBrakeHoldFrames = 0;
+            BalanceBrakeDirection = 0;
         }
         return;
     }
+
     if (Mode3Phase == MODE3_PHASE_TO_MINUS)
     {
-        predicted_x = BallFilteredX + BallVelocityX * MODE1_LEVEL_PREDICT_TIME_S;
-        if ((((BallFilteredX <= MODE1_SWITCH_TO_LEVEL_X) ||
-              (predicted_x <= (float)BALL_MINUS_5CM_X + MODE1_MINUS_BRAKE_MARGIN_PIXELS)) &&
-             BallVelocityX <= -MODE1_SWITCH_MIN_VELOCITY) ||
-            phase_elapsed_ms >= MODE1_BRAKE_TIMEOUT_MS)
+        if (AbsFloat(BallFilteredX - (float)BALL_MINUS_5CM_X) <=
+                MODE3_FINAL_ERROR_PIXELS &&
+            AbsFloat(BallVelocityX) <= MODE3_FINAL_VELOCITY)
         {
-            Mode3Phase = MODE3_PHASE_HOLD_MINUS;
-            BalanceTargetX = BALL_MINUS_5CM_X;
-            Mode1PhaseStartMs = SystemTickMs;
+            if (Mode3ReachCount < MODE3_FINAL_STABLE_FRAMES)
+                Mode3ReachCount++;
+        }
+        else
+        {
             Mode3ReachCount = 0;
         }
-        return;
+
+        if (Mode3ReachCount >= MODE3_FINAL_STABLE_FRAMES)
+        {
+            Mode3Phase = MODE3_PHASE_HOLD_MINUS;
+            Mode3CompleteMs = SystemTickMs;
+        }
     }
-    if (AbsFloat(BallFilteredX - (float)BALL_MINUS_5CM_X) <= MODE1_FINAL_ERROR_PIXELS &&
-        AbsFloat(BallVelocityX) <= MODE1_FINAL_VELOCITY)
-    {
-        if (Mode3ReachCount < MODE1_FINAL_STABLE_FRAMES)
-            Mode3ReachCount++;
-    }
-    else
-        Mode3ReachCount = 0;
-    if (Mode3ReachCount >= MODE1_FINAL_STABLE_FRAMES && Mode3CompleteMs == 0)
-        Mode3CompleteMs = SystemTickMs;
 }
+
 /**
  * @brief Process a new vision frame and update position/velocity feedback.
  * @param target_x 原始小球X像素
@@ -427,9 +374,6 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
 
     if (!VisionValid)
     {
-        if (CurrentMode == MODE_REQUIREMENT_3)
-            Mode1PhaseStartMs = sample_ms;
-
         // 第一次收到有效视觉数据，初始化滤波器
         VisionValid = 1;
         BallFilteredX = raw_x;
@@ -474,18 +418,9 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
     }
 
     if (CurrentMode == MODE_REQUIREMENT_3)
-        Mode1_UpdatePhase();
+        Mode3_UpdatePhase();
 
     BalanceErrorX = BallFilteredX - (float)BalanceTargetX;
-
-    if (CurrentMode == MODE_REQUIREMENT_3 &&
-        Mode3Phase != MODE3_PHASE_HOLD_MINUS)
-    {
-        BalanceTargetSteps = Mode1_TargetHeightSteps();
-        BalanceIntegralSteps = 0.0f;
-        return;
-    }
-
     Balance_UpdateTargetPosition(dt_s);
 }
 
@@ -502,38 +437,26 @@ static void Balance_ControlTick(void)
 
     Serial_ReadTarget(&target_x, &target_y, &velocity_centi,
                        &last_rx_ms, &frame_id);
-    (void)target_y; // Y坐标本程序没有使用
+    (void)target_y; // Y coordinate is not used.
 
     if (TargetIsFresh(target_x, last_rx_ms))
     {
-        if (frame_id != LastControlFrameId)   // 只处理没有处理过的新帧
-            Balance_ProcessNewFrame(target_x, velocity_centi, frame_id, last_rx_ms);
+        if (frame_id != LastControlFrameId)
+            Balance_ProcessNewFrame(target_x, velocity_centi,
+                                    frame_id, last_rx_ms);
     }
     else
     {
-        // 视觉数据失效，重置控制器，电机锁止
         Balance_ResetEstimator();
         EMM_Hold(&BalanceMotor);
         return;
     }
 
-    // 将速度指令下发电机驱动
-    if (CurrentMode == MODE_REQUIREMENT_3 &&
-        Mode3Phase != MODE3_PHASE_HOLD_MINUS)
-    {
-        BalanceTargetSteps = Mode1_TargetHeightSteps();
-        BalanceSpeedCommand =
-            PositionServo_CalculateSpeed(BalanceTargetSteps,
-                                         MODE1_FIXED_SPEED_HZ,
-                                         MODE1_STOP_WINDOW_STEPS);
-    }
-    else
-    {
-        BalanceSpeedCommand =
-            PositionServo_CalculateSpeed(BalanceTargetSteps,
-                                         BALANCE_MOTOR_FIXED_SPEED_HZ,
-                                         BALANCE_MOTOR_STOP_WINDOW_STEPS);
-    }
+    /* All modes use the same fixed-speed motor position servo. */
+    BalanceSpeedCommand =
+        PositionServo_CalculateSpeed(BalanceTargetSteps,
+                                     BALANCE_MOTOR_FIXED_SPEED_HZ,
+                                     BALANCE_MOTOR_STOP_WINDOW_STEPS);
     EMM_Apply_Speed(&BalanceMotor, BalanceSpeedCommand,
                     (float)CONTROL_PERIOD_MS / 1000.0f);
 }
@@ -599,21 +522,17 @@ static void OLED_ShowStatus(void)
     {
         OLED_ShowString(4, 1, "RUN Hold Center ");
     }
-    else if (Mode3Phase == MODE1_PHASE_WAIT_START)
-    {
-        OLED_ShowString(4, 1, "WAIT Ball Center");
-    }
     else if (Mode3Phase == MODE3_PHASE_TO_PLUS)
     {
-        OLED_ShowString(4, 1, "RUN Raise/Accel ");
+        OLED_ShowString(4, 1, "RUN To +5cm     ");
     }
     else if (Mode3Phase == MODE3_PHASE_TO_MINUS)
     {
-        OLED_ShowString(4, 1, "RUN Reverse/Brk ");
+        OLED_ShowString(4, 1, "RUN To -5cm     ");
     }
     else if (Mode3CompleteMs == 0)
     {
-        OLED_ShowString(4, 1, "RUN Level/Coast ");
+        OLED_ShowString(4, 1, "RUN Hold -5cm   ");
     }
     else if ((uint32_t)(SystemTickMs - Mode3CompleteMs) <= 5000)
     {
@@ -621,7 +540,7 @@ static void OLED_ShowStatus(void)
     }
     else
     {
-        OLED_ShowString(4, 1, "HOLD Level      ");
+        OLED_ShowString(4, 1, "HOLD At -5cm    ");
     }
 }
 
