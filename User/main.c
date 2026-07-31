@@ -21,9 +21,15 @@
 #define BALANCE_POSITION_VEL_KP_NEAR    0.15f
 #define BALANCE_DESIRED_VELOCITY_MAX  800.0f
 #define BALANCE_ACCEL_STEP_KP            4.8f
+#define BALANCE_BRAKE_STEP_KP            12.0f
+#define BALANCE_BRAKE_PREDICT_TIME_S     0.55f
+#define BALANCE_BRAKE_MIN_VELOCITY      70.0f
+#define BALANCE_BRAKE_RELEASE_VELOCITY  40.0f
+#define BALANCE_BRAKE_HOLD_FRAMES           4
+#define BALANCE_BRAKE_MIN_TARGET_STEPS 800.0f
 #define BALANCE_BRAKE_TARGET_ALPHA       1.00f
 #define BALANCE_POSITION_INTEGRAL_KI   0.5f
-#define BALANCE_GAIN_SCHEDULE_PIXELS 160.0f
+#define BALANCE_GAIN_SCHEDULE_PIXELS 320.0f
 #define BALANCE_INTEGRAL_ZONE_PIXELS  45.0f
 #define BALANCE_INTEGRAL_MAX_STEPS   260.0f
 #define BALANCE_TARGET_LIMIT_STEPS  3000.0f
@@ -34,10 +40,9 @@
 #define BALANCE_CENTER_HOLD_VELOCITY   70.0f
 #define BALANCE_MOTOR_SIGN              1.0f
 /* Requirement 3 point-to-point tuning. */
-#define MODE3_GAIN_SCHEDULE_PIXELS                320.0f
 #define MODE3_PLUS_REACH_PIXELS                    15.0f
 #define MODE3_PLUS_BRAKE_ENABLE_PIXELS             60.0f
-#define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          800.0f
+#define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          300.0f
 #define MODE3_PLUS_BRAKE_STEP_KP                     6.0f
 #define MODE3_PLUS_BRAKE_PREDICT_TIME_S              0.05f
 #define MODE3_PLUS_BRAKE_MIN_VELOCITY              130.0f
@@ -45,7 +50,7 @@
 #define MODE3_PLUS_BRAKE_HOLD_FRAMES                    1
 #define MODE3_PLUS_BRAKE_MIN_TARGET_STEPS          300.0f
 #define MODE3_MINUS_BRAKE_STEP_KP                    8.0f
-#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.5f
+#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.42f
 #define MODE3_MINUS_BRAKE_MIN_VELOCITY              90.0f
 #define MODE3_MINUS_BRAKE_RELEASE_VELOCITY          60.0f
 #define MODE3_MINUS_BRAKE_HOLD_FRAMES                   2
@@ -208,7 +213,6 @@ static void Balance_UpdateTargetPosition(float dt_s)
     float predicted_error;
     float predicted_abs_error;
     float gain_ratio;
-    float gain_schedule_pixels;
     float position_velocity_kp;
     float desired_velocity;
     float velocity_error;
@@ -226,38 +230,45 @@ static void Balance_UpdateTargetPosition(float dt_s)
     uint8_t braking = 0;
     int8_t motion_direction = 0;
 
-    gain_schedule_pixels = (CurrentMode == MODE_REQUIREMENT_3) ?
-                           MODE3_GAIN_SCHEDULE_PIXELS :
-                           BALANCE_GAIN_SCHEDULE_PIXELS;
-
-    if (CurrentMode == MODE_REQUIREMENT_3 &&
-        Mode3Phase == MODE3_PHASE_TO_PLUS)
+    if (CurrentMode == MODE_REQUIREMENT_3)
     {
-        brake_step_kp = MODE3_PLUS_BRAKE_STEP_KP;
-        brake_predict_time_s = MODE3_PLUS_BRAKE_PREDICT_TIME_S;
-        brake_min_velocity = MODE3_PLUS_BRAKE_MIN_VELOCITY;
-        brake_release_velocity = MODE3_PLUS_BRAKE_RELEASE_VELOCITY;
-        brake_hold_frames = MODE3_PLUS_BRAKE_HOLD_FRAMES;
-        brake_min_target_steps = MODE3_PLUS_BRAKE_MIN_TARGET_STEPS;
+        if (Mode3Phase == MODE3_PHASE_TO_PLUS)
+        {
+            brake_step_kp = MODE3_PLUS_BRAKE_STEP_KP;
+            brake_predict_time_s = MODE3_PLUS_BRAKE_PREDICT_TIME_S;
+            brake_min_velocity = MODE3_PLUS_BRAKE_MIN_VELOCITY;
+            brake_release_velocity = MODE3_PLUS_BRAKE_RELEASE_VELOCITY;
+            brake_hold_frames = MODE3_PLUS_BRAKE_HOLD_FRAMES;
+            brake_min_target_steps = MODE3_PLUS_BRAKE_MIN_TARGET_STEPS;
+        }
+        else
+        {
+            float taper_ratio;
+
+            brake_step_kp = MODE3_MINUS_BRAKE_STEP_KP;
+            brake_predict_time_s = MODE3_MINUS_BRAKE_PREDICT_TIME_S;
+            brake_min_velocity = MODE3_MINUS_BRAKE_MIN_VELOCITY;
+            brake_release_velocity = MODE3_MINUS_BRAKE_RELEASE_VELOCITY;
+            brake_hold_frames = MODE3_MINUS_BRAKE_HOLD_FRAMES;
+
+            /* Reduce only the forced minimum near -5; calculated high-speed braking remains available. */
+            taper_ratio = ClampFloat(abs_error /
+                                     MODE3_MINUS_BRAKE_TAPER_PIXELS,
+                                     0.0f, 1.0f);
+            brake_min_target_steps =
+                MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS +
+                (MODE3_MINUS_BRAKE_MIN_TARGET_STEPS -
+                 MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS) * taper_ratio;
+        }
     }
     else
     {
-        float taper_ratio;
-
-        /* Mode 2 directly reuses the proven +5 to -5 braking parameters. */
-        brake_step_kp = MODE3_MINUS_BRAKE_STEP_KP;
-        brake_predict_time_s = MODE3_MINUS_BRAKE_PREDICT_TIME_S;
-        brake_min_velocity = MODE3_MINUS_BRAKE_MIN_VELOCITY;
-        brake_release_velocity = MODE3_MINUS_BRAKE_RELEASE_VELOCITY;
-        brake_hold_frames = MODE3_MINUS_BRAKE_HOLD_FRAMES;
-
-        taper_ratio = ClampFloat(abs_error /
-                                 MODE3_MINUS_BRAKE_TAPER_PIXELS,
-                                 0.0f, 1.0f);
-        brake_min_target_steps =
-            MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS +
-            (MODE3_MINUS_BRAKE_MIN_TARGET_STEPS -
-             MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS) * taper_ratio;
+        brake_step_kp = BALANCE_BRAKE_STEP_KP;
+        brake_predict_time_s = BALANCE_BRAKE_PREDICT_TIME_S;
+        brake_min_velocity = BALANCE_BRAKE_MIN_VELOCITY;
+        brake_release_velocity = BALANCE_BRAKE_RELEASE_VELOCITY;
+        brake_hold_frames = BALANCE_BRAKE_HOLD_FRAMES;
+        brake_min_target_steps = BALANCE_BRAKE_MIN_TARGET_STEPS;
     }
 
     /* Predict the ball position after camera, motor and linkage delay. */
@@ -269,7 +280,7 @@ static void Balance_UpdateTargetPosition(float dt_s)
     predicted_abs_error = AbsFloat(predicted_error);
 
     gain_ratio = ClampFloat(predicted_abs_error /
-                            gain_schedule_pixels,
+                            BALANCE_GAIN_SCHEDULE_PIXELS,
                             0.0f, 1.0f);
     position_velocity_kp = BALANCE_POSITION_VEL_KP_NEAR +
         (BALANCE_POSITION_VEL_KP_FAR -
