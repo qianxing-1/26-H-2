@@ -39,35 +39,10 @@
 #define BALANCE_CENTER_HOLD_PIXELS      8.0f
 #define BALANCE_CENTER_HOLD_VELOCITY   70.0f
 #define BALANCE_MOTOR_SIGN              1.0f
-
-/* Center mode: fast rejection of small, high-speed disturbances on the car. */
-#define CENTER_POSITION_STEP_KP                   14.0f
-#define CENTER_VELOCITY_STEP_KD                    5.0f
-#define CENTER_PREDICT_TIME_S                      0.12f
-#define CENTER_POSITION_DEADBAND_PIXELS            2.0f
-#define CENTER_VELOCITY_DEADBAND                   12.0f
-#define CENTER_MIN_RESPONSE_VELOCITY               35.0f
-#define CENTER_MIN_RESPONSE_STEPS                 260.0f
-#define CENTER_TARGET_LIMIT_STEPS                1800.0f
-#define CENTER_TARGET_FILTER_ALPHA                  1.0f
-#define CENTER_MOTOR_STOP_WINDOW_STEPS             60.0f
-#define CENTER_HOLD_PIXELS                          3.0f
-#define CENTER_HOLD_PREDICTED_PIXELS                4.0f
-#define CENTER_HOLD_VELOCITY                       18.0f
-#define CENTER_POSITION_INTEGRAL_KI                 0.30f
-#define CENTER_INTEGRAL_ZONE_PIXELS                20.0f
-#define CENTER_INTEGRAL_MAX_VELOCITY               20.0f
-#define CENTER_INTEGRAL_MAX_STEPS                 180.0f
-#define CENTER_POSITION_FILTER_ALPHA_NEAR           0.72f
-#define CENTER_POSITION_FILTER_ALPHA_FAR            0.90f
-#define CENTER_POSITION_FILTER_FAR_PIXELS            6.0f
-#define CENTER_VELOCITY_FILTER_ALPHA                0.60f
-#define CENTER_CAMERA_VELOCITY_WEIGHT               0.85f
-
 /* Requirement 3 point-to-point tuning. */
 #define MODE3_PLUS_REACH_PIXELS                    15.0f
 #define MODE3_PLUS_BRAKE_ENABLE_PIXELS             60.0f
-#define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          800.0f
+#define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          300.0f
 #define MODE3_PLUS_BRAKE_STEP_KP                     6.0f
 #define MODE3_PLUS_BRAKE_PREDICT_TIME_S              0.05f
 #define MODE3_PLUS_BRAKE_MIN_VELOCITY              130.0f
@@ -75,7 +50,7 @@
 #define MODE3_PLUS_BRAKE_HOLD_FRAMES                    1
 #define MODE3_PLUS_BRAKE_MIN_TARGET_STEPS          300.0f
 #define MODE3_MINUS_BRAKE_STEP_KP                    8.0f
-#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.50f
+#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.42f
 #define MODE3_MINUS_BRAKE_MIN_VELOCITY              90.0f
 #define MODE3_MINUS_BRAKE_RELEASE_VELOCITY          60.0f
 #define MODE3_MINUS_BRAKE_HOLD_FRAMES                   2
@@ -427,79 +402,6 @@ static void Balance_UpdateTargetPosition(float dt_s)
         (raw_target - BalanceTargetSteps) * alpha;
 }
 
-static void Center_UpdateTargetPosition(float dt_s)
-{
-    float position_error = BalanceErrorX;
-    float velocity = BallVelocityX;
-    float predicted_error;
-    float raw_target;
-    float alpha = CENTER_TARGET_FILTER_ALPHA;
-    int8_t response_direction = 0;
-
-    if (AbsFloat(position_error) <= CENTER_POSITION_DEADBAND_PIXELS)
-        position_error = 0.0f;
-    if (AbsFloat(velocity) <= CENTER_VELOCITY_DEADBAND)
-        velocity = 0.0f;
-
-    /* Velocity reacts before the small inertial displacement becomes large. */
-    predicted_error = position_error + velocity * CENTER_PREDICT_TIME_S;
-    predicted_error = ClampFloat(predicted_error,
-                                 -(float)BALL_COORDINATE_MAX,
-                                 (float)BALL_COORDINATE_MAX);
-
-    if (AbsFloat(BalanceErrorX) <= CENTER_INTEGRAL_ZONE_PIXELS &&
-        AbsFloat(BallVelocityX) <= CENTER_INTEGRAL_MAX_VELOCITY)
-    {
-        BalanceIntegralSteps += CENTER_POSITION_INTEGRAL_KI *
-                                BalanceErrorX * dt_s;
-        BalanceIntegralSteps = ClampFloat(BalanceIntegralSteps,
-                                          -CENTER_INTEGRAL_MAX_STEPS,
-                                          CENTER_INTEGRAL_MAX_STEPS);
-    }
-    else
-    {
-        BalanceIntegralSteps *= 0.90f;
-    }
-
-    if (AbsFloat(BalanceErrorX) <= CENTER_HOLD_PIXELS &&
-        AbsFloat(predicted_error) <= CENTER_HOLD_PREDICTED_PIXELS &&
-        AbsFloat(BallVelocityX) <= CENTER_HOLD_VELOCITY)
-    {
-        raw_target = BalanceIntegralSteps;
-    }
-    else
-    {
-        raw_target = CENTER_POSITION_STEP_KP * predicted_error +
-                     CENTER_VELOCITY_STEP_KD * velocity +
-                     BalanceIntegralSteps;
-
-        if (AbsFloat(BallVelocityX) >= CENTER_MIN_RESPONSE_VELOCITY &&
-            AbsFloat(raw_target) < CENTER_MIN_RESPONSE_STEPS)
-        {
-            if (raw_target > 0.0f)
-                response_direction = 1;
-            else if (raw_target < 0.0f)
-                response_direction = -1;
-            else if (BallVelocityX > 0.0f)
-                response_direction = 1;
-            else if (BallVelocityX < 0.0f)
-                response_direction = -1;
-
-            raw_target = (float)response_direction *
-                         CENTER_MIN_RESPONSE_STEPS;
-        }
-    }
-
-    raw_target *= BALANCE_MOTOR_SIGN;
-    raw_target = ClampFloat(raw_target,
-                            -CENTER_TARGET_LIMIT_STEPS,
-                            CENTER_TARGET_LIMIT_STEPS);
-
-    if (raw_target * BalanceTargetSteps < 0.0f)
-        alpha = 1.0f;
-    BalanceTargetSteps += (raw_target - BalanceTargetSteps) * alpha;
-}
-
 static void Mode3_UpdatePhase(void)
 {
     if (Mode3Phase == MODE3_PHASE_TO_PLUS)
@@ -612,67 +514,6 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
     Balance_UpdateTargetPosition(dt_s);
 }
 
-static void Center_ProcessNewFrame(uint16_t target_x,
-                                   int32_t velocity_centi,
-                                   uint32_t frame_id, uint32_t sample_ms)
-{
-    float raw_x = (float)target_x;
-    float dt_s = 0.01f;
-    float delta;
-    float alpha;
-    float measured_velocity = 0.0f;
-    float camera_velocity;
-
-    LastControlFrameId = frame_id;
-
-    if (!VisionValid)
-    {
-        VisionValid = 1;
-        BallFilteredX = raw_x;
-        LastFilteredX = raw_x;
-        CameraVelocityX = ClampFloat((float)velocity_centi * 0.01f,
-                                     -MAX_MEASURED_VELOCITY,
-                                     MAX_MEASURED_VELOCITY);
-        BallVelocityX = CameraVelocityX;
-        LastSampleMs = sample_ms;
-    }
-    else
-    {
-        uint32_t dt_ms = (uint32_t)(sample_ms - LastSampleMs);
-
-        if (dt_ms >= 2 && dt_ms <= 100)
-            dt_s = (float)dt_ms / 1000.0f;
-
-        delta = raw_x - BallFilteredX;
-        alpha = (AbsFloat(delta) >=
-                 CENTER_POSITION_FILTER_FAR_PIXELS) ?
-                CENTER_POSITION_FILTER_ALPHA_FAR :
-                CENTER_POSITION_FILTER_ALPHA_NEAR;
-        BallFilteredX += delta * alpha;
-
-        measured_velocity = (BallFilteredX - LastFilteredX) / dt_s;
-        measured_velocity = ClampFloat(measured_velocity,
-                                       -MAX_MEASURED_VELOCITY,
-                                       MAX_MEASURED_VELOCITY);
-        camera_velocity = ClampFloat((float)velocity_centi * 0.01f,
-                                      -MAX_MEASURED_VELOCITY,
-                                      MAX_MEASURED_VELOCITY);
-        CameraVelocityX += (camera_velocity - CameraVelocityX) *
-                          CENTER_VELOCITY_FILTER_ALPHA;
-        BallVelocityX +=
-            (((CameraVelocityX * CENTER_CAMERA_VELOCITY_WEIGHT) +
-              (measured_velocity *
-               (1.0f - CENTER_CAMERA_VELOCITY_WEIGHT))) -
-             BallVelocityX) * CENTER_VELOCITY_FILTER_ALPHA;
-
-        LastFilteredX = BallFilteredX;
-        LastSampleMs = sample_ms;
-    }
-
-    BalanceErrorX = BallFilteredX - (float)BALL_CENTER_X;
-    Center_UpdateTargetPosition(dt_s);
-}
-
 /**
  * @brief 5ms控制周期执行函数，读取视觉，执行控制输出
  */
@@ -691,14 +532,8 @@ static void Balance_ControlTick(void)
     if (TargetIsFresh(target_x, last_rx_ms))
     {
         if (frame_id != LastControlFrameId)
-        {
-            if (CurrentMode == MODE_REQUIREMENT_3)
-                Balance_ProcessNewFrame(target_x, velocity_centi,
-                                        frame_id, last_rx_ms);
-            else
-                Center_ProcessNewFrame(target_x, velocity_centi,
-                                       frame_id, last_rx_ms);
-        }
+            Balance_ProcessNewFrame(target_x, velocity_centi,
+                                    frame_id, last_rx_ms);
     }
     else
     {
@@ -707,20 +542,11 @@ static void Balance_ControlTick(void)
         return;
     }
 
-    if (CurrentMode == MODE_REQUIREMENT_3)
-    {
-        BalanceSpeedCommand =
-            PositionServo_CalculateSpeed(BalanceTargetSteps,
-                                         BALANCE_MOTOR_FIXED_SPEED_HZ,
-                                         BALANCE_MOTOR_STOP_WINDOW_STEPS);
-    }
-    else
-    {
-        BalanceSpeedCommand =
-            PositionServo_CalculateSpeed(BalanceTargetSteps,
-                                         BALANCE_MOTOR_FIXED_SPEED_HZ,
-                                         CENTER_MOTOR_STOP_WINDOW_STEPS);
-    }
+    /* All modes use the same fixed-speed motor position servo. */
+    BalanceSpeedCommand =
+        PositionServo_CalculateSpeed(BalanceTargetSteps,
+                                     BALANCE_MOTOR_FIXED_SPEED_HZ,
+                                     BALANCE_MOTOR_STOP_WINDOW_STEPS);
     EMM_Apply_Speed(&BalanceMotor, BalanceSpeedCommand,
                     (float)CONTROL_PERIOD_MS / 1000.0f);
 }
