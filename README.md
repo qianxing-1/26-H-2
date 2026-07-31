@@ -92,14 +92,17 @@ v_error = v_ref - 小球实测速度
 ## 高灵敏机械结构
 
 当前机构不到四分之一圈即可获得足够的加速和制动力。按1.8度步进电机、8细分估算，
-一圈约1600个脉冲，四分之一圈约400个脉冲，因此控制参数统一改到约400步的有效范围：
+一圈约1600个脉冲，45度约200个脉冲。控制器留出约20步余量，驱动层在正负45度处停止继续向外运动：
 
-- `BALANCE_TARGET_LIMIT_STEPS = 360`：控制器允许的最大倾角，约0.225圈。
-- `TRACK_POSITION_LIMIT = 420`：从上电水平位置计算的硬件软件限位，略大于控制限幅。
-- `BALANCE_MOTOR_STOP_WINDOW_STEPS = 5`：目标与估算位置相差超过5步即可动作。
-- `BALANCE_MOTOR_FIXED_SPEED_HZ = 1500`：目标位置追踪速度；不会改变倾角，只改变到位时间。
-- `TRACK_START_SPEED_HZ = 500`：启动频率，避免新机构一启动就冲击过大。
-- `TRACK_MAX_SPEED_HZ = 1800`：驱动层速度上限。
+- `BALANCE_TARGET_LIMIT_STEPS = 180`：正常控制目标限制在正负40.5度以内。
+- `TRACK_POSITION_LIMIT = 200`：从上电水平位置计算的正负45度软件保护限位。
+- `BALANCE_MOTOR_STOP_WINDOW_STEPS = 4`：目标与估算位置相差超过4步才动作。
+- `BALANCE_MOTOR_FIXED_SPEED_HZ = 450`：目标位置追踪速度，完整走完45度约需0.45秒。
+- `TRACK_START_SPEED_HZ = 120`：降低启动冲击。
+- `TRACK_MAX_SPEED_HZ = 600`：驱动层绝对速度上限。
+- `TRACK_ACCEL_HZ_PER_S = 20000`、`TRACK_DECEL_HZ_PER_S = 40000`：减缓启动并保留较快停止能力。
+
+该限位依赖软件累计脉冲，不是绝对位置检测。每次上电前必须先把管道放在机械水平中位；若在偏斜位置上电，软件中的零点也会随之偏移，不能保证真实角度不超过45度。
 
 原来电机不转的直接原因是目标最大值只有30步，而停止窗口仍为160步，所有目标都会被判定为
 “已经到位”；同时固定速度和驱动最大速度被调成90 Hz，响应也会非常慢。
@@ -107,12 +110,12 @@ v_error = v_ref - 小球实测速度
 新结构建议按以下顺序调节：
 
 1. 先确认安全行程：让 `BALANCE_TARGET_LIMIT_STEPS` 保持小于 `TRACK_POSITION_LIMIT`，不要同时随意增大。
-2. 电机仍不动作：先检查有效坐标和使能，再把 `BALANCE_MOTOR_STOP_WINDOW_STEPS` 从5减到3，不要先增大全部增益。
+2. 电机仍不动作：先检查有效坐标和使能，再把 `BALANCE_MOTOR_STOP_WINDOW_STEPS` 从4减到3，不要先增大全部增益。
 3. 电机会动但倾角不足：中心模式增大 `BALANCE_ACCEL_STEP_KP`；去+5增大 `MODE3_PLUS_DRIVE_MIN_TARGET_STEPS`。
 4. 加速过猛：减小 `BALANCE_ACCEL_STEP_KP`，或减小 `BALANCE_TARGET_LIMIT_STEPS`。
 5. 制动太晚：增大对应的 `*_BRAKE_PREDICT_TIME_S`，每次增加 `0.03~0.05 s`。
 6. 换向及时但刹不住：增大对应的 `*_BRAKE_STEP_KP`，再小幅增大 `*_BRAKE_MIN_TARGET_STEPS`。
-7. 目标附近抖动：减小近端最低制动步数，或把停止窗口从5增加到7~10步。
+7. 目标附近抖动：减小近端最低制动步数，或把停止窗口从4增加到6~8步。
 8. 电机到位太慢：提高 `BALANCE_MOTOR_FIXED_SPEED_HZ`，但不得超过 `TRACK_MAX_SPEED_HZ`。
 9. 电机失步或机械冲击明显：降低 `TRACK_START_SPEED_HZ` 和 `BALANCE_MOTOR_FIXED_SPEED_HZ`。
 

@@ -2,14 +2,14 @@
 #include "EMM_Gimbal.h"
 
 /* Motor tuning: one control tick is normally 5 ms. */
-#define TRACK_MIN_SPEED_HZ         100.0f
-#define TRACK_START_SPEED_HZ      500.0f
-#define TRACK_MAX_SPEED_HZ       1800.0f
-#define TRACK_ACCEL_HZ_PER_S    100000.0f
-#define TRACK_DECEL_HZ_PER_S    300000.0f
+#define TRACK_MIN_SPEED_HZ          40.0f
+#define TRACK_START_SPEED_HZ       120.0f
+#define TRACK_MAX_SPEED_HZ         600.0f
+#define TRACK_ACCEL_HZ_PER_S     20000.0f
+#define TRACK_DECEL_HZ_PER_S     40000.0f
 
 /* Relative pulse limit from the level power-up position; tune to the linkage. */
-#define TRACK_POSITION_LIMIT       420.0f
+#define TRACK_POSITION_LIMIT       200.0f
 
 #define MOTOR_DIR_CW_UP             0
 #define MOTOR_DIR_CCW_DOWN          1
@@ -78,9 +78,9 @@ void EMM_Set_Direction(EMM_Motor *motor, uint8_t dir)
 {
     motor->Direction = dir;
     if (dir == MOTOR_DIR_CCW_DOWN)
-        GPIO_ResetBits(motor->DIR_Port, motor->DIR_Pin);
-    else
         GPIO_SetBits(motor->DIR_Port, motor->DIR_Pin);
+    else
+        GPIO_ResetBits(motor->DIR_Port, motor->DIR_Pin);
 }
 
 void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
