@@ -29,9 +29,9 @@
 #define BALANCE_BRAKE_HOLD_FRAMES           1
 #define BALANCE_BRAKE_MIN_TARGET_STEPS   8.0f
 #define BALANCE_BRAKE_TARGET_ALPHA       1.00f
-/* Integral gain is independent so mode 3 can disable it near -5. */
-#define BALANCE_POSITION_INTEGRAL_KI     0.2f
-#define MODE3_POSITION_INTEGRAL_KI       0.0f
+/* Requirement 3 has independent integral gain; center and first-X modes share BALANCE KI. */
+#define BALANCE_POSITION_INTEGRAL_KI     0.3f
+#define MODE3_POSITION_INTEGRAL_KI       0.2f
 #define BALANCE_GAIN_SCHEDULE_PIXELS   240.0f
 #define BALANCE_INTEGRAL_ZONE_PIXELS    32.0f
 #define BALANCE_INTEGRAL_MAX_STEPS      6.0f
@@ -74,6 +74,7 @@
 /* 任务模式3要求：先到达+5cm，再反向稳定到?5cm */
 #define MODE_REQUIREMENT_3               1     // 模式3：+5cm再到?5cm往复任务
 #define MODE_REQUIREMENT_4_5             2     // 模式4/5：小球保持在中心
+#define MODE_HOLD_INITIAL_X              3     // Mode 3: hold the first valid X received after start
 
 #define MODE3_PHASE_TO_PLUS              0     // 模式3状态：运动到+5cm
 #define MODE3_PHASE_TO_MINUS             1     // 模式3状态：运动到?5cm
@@ -88,6 +89,7 @@ volatile uint32_t SystemTickMs = 0;              // 系统毫秒时钟，TIM2中断累加
 static volatile uint8_t CurrentMode = MODE_REQUIREMENT_3;    // 当前工作模式
 static volatile uint8_t ControlEnabled = 0;                   // 控制器使能标志 0关闭 1开启
 static volatile uint8_t VisionValid = 0;                     // 视觉数据有效标志
+static volatile uint8_t InitialTargetLocked = 0;              // Dynamic-origin target captured for the current run
 static volatile uint8_t Mode3Phase = MODE3_PHASE_TO_PLUS;     // Mode3状态机阶段
 static volatile uint8_t Mode3ReachCount = 0;                  // 到达目标稳定帧数计数器
 static volatile uint16_t BalanceTargetX = BALL_PLUS_5CM_X;    // 当前控制目标X像素
@@ -180,8 +182,13 @@ static void Balance_Start(void)
     Mode3CompleteMs = 0;
     Mode3ReachCount = 0;
     Mode3Phase = MODE3_PHASE_TO_PLUS;
-    BalanceTargetX = (CurrentMode == MODE_REQUIREMENT_3) ?
-                     BALL_PLUS_5CM_X : BALL_CENTER_X;
+    InitialTargetLocked = 0;
+    if (CurrentMode == MODE_REQUIREMENT_3)
+        BalanceTargetX = BALL_PLUS_5CM_X;
+    else if (CurrentMode == MODE_HOLD_INITIAL_X)
+        BalanceTargetX = 0;
+    else
+        BalanceTargetX = BALL_CENTER_X;
     Balance_ResetEstimator();
     EMM_Hold(&BalanceMotor);        // Keep the current pipe position while starting.
     ControlEnabled = 1;
@@ -514,6 +521,14 @@ static void Balance_ProcessNewFrame(uint16_t target_x,
         LastSampleMs = sample_ms;
     }
 
+    if (CurrentMode == MODE_HOLD_INITIAL_X && !InitialTargetLocked)
+    {
+        /* Lock the first fresh frame after PC15; later dropouts keep this target. */
+        BalanceTargetX = target_x;
+        InitialTargetLocked = 1;
+        BalanceIntegralSteps = 0.0f;
+    }
+
     if (CurrentMode == MODE_REQUIREMENT_3)
         Mode3_UpdatePhase();
 
@@ -580,8 +595,10 @@ static void OLED_ShowModeLine(void)
 {
     if (CurrentMode == MODE_REQUIREMENT_3)
         OLED_ShowString(1, 1, "M1 Req3 +-5cm  ");
-    else
+    else if (CurrentMode == MODE_REQUIREMENT_4_5)
         OLED_ShowString(1, 1, "M2 Req4/5 O    ");
+    else
+        OLED_ShowString(1, 1, "M3 FirstX Hold ");
 }
 
 /**
@@ -618,6 +635,10 @@ static void OLED_ShowStatus(void)
     else if (CurrentMode == MODE_REQUIREMENT_4_5)
     {
         OLED_ShowString(4, 1, "RUN Hold Center ");
+    }
+    else if (CurrentMode == MODE_HOLD_INITIAL_X)
+    {
+        OLED_ShowString(4, 1, "RUN Hold Initial");
     }
     else if (Mode3Phase == MODE3_PHASE_TO_PLUS)
     {
@@ -661,10 +682,20 @@ int main(void)
         {   // 按键1切换模式，运行中先停止控制器
             if (ControlEnabled)
                 Balance_Stop();
-            CurrentMode = (CurrentMode == MODE_REQUIREMENT_3) ?
-                          MODE_REQUIREMENT_4_5 : MODE_REQUIREMENT_3;
-            BalanceTargetX = (CurrentMode == MODE_REQUIREMENT_3) ?
-                             BALL_PLUS_5CM_X : BALL_CENTER_X;
+            if (CurrentMode == MODE_REQUIREMENT_3)
+                CurrentMode = MODE_REQUIREMENT_4_5;
+            else if (CurrentMode == MODE_REQUIREMENT_4_5)
+                CurrentMode = MODE_HOLD_INITIAL_X;
+            else
+                CurrentMode = MODE_REQUIREMENT_3;
+
+            InitialTargetLocked = 0;
+            if (CurrentMode == MODE_REQUIREMENT_3)
+                BalanceTargetX = BALL_PLUS_5CM_X;
+            else if (CurrentMode == MODE_REQUIREMENT_4_5)
+                BalanceTargetX = BALL_CENTER_X;
+            else
+                BalanceTargetX = 0;
             OLED_ShowStatus();
         }
         else if (KeyNum == 2 && !ControlEnabled)
