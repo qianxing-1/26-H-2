@@ -6,9 +6,9 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 - PC14：切换要求3、要求4/5两个模式；运行中按下会先停止。
 - PC15：启动当前模式。
 - 模式1（要求3）：从任意有效小球位置出发，先定点控制到 +5 cm，进入到达范围后立即切换目标并稳定在 -5 cm。
-- 模式2（要求4/5）：持续稳定在中心坐标333。
+- 模式2（要求4/5）：持续稳定在中心坐标322。
 
-当前标定为中心333、+5 cm=496、-5 cm=170。控制、滤波和步进电机
+当前标定为中心322、+5 cm=450、-5 cm=180。控制、滤波和步进电机
 参数集中在 `User/main.c` 与 `Hardware/EMM_Gimbal.c` 文件顶部。
 如果实际DIR接线与当前约定相反，只需把 `BALANCE_MOTOR_SIGN` 改为 `-1.0f`。
 
@@ -88,3 +88,32 @@ v_error = v_ref - 小球实测速度
 
 `BALANCE_BRAKE_*` 参数只用于模式2；模式3分别使用 `MODE3_PLUS_BRAKE_*` 和
 `MODE3_MINUS_BRAKE_*`，两段行程可以独立调节。
+
+## 高灵敏机械结构
+
+当前机构不到四分之一圈即可获得足够的加速和制动力。按1.8度步进电机、8细分估算，
+一圈约1600个脉冲，四分之一圈约400个脉冲，因此控制参数统一改到约400步的有效范围：
+
+- `BALANCE_TARGET_LIMIT_STEPS = 360`：控制器允许的最大倾角，约0.225圈。
+- `TRACK_POSITION_LIMIT = 420`：从上电水平位置计算的硬件软件限位，略大于控制限幅。
+- `BALANCE_MOTOR_STOP_WINDOW_STEPS = 5`：目标与估算位置相差超过5步即可动作。
+- `BALANCE_MOTOR_FIXED_SPEED_HZ = 1500`：目标位置追踪速度；不会改变倾角，只改变到位时间。
+- `TRACK_START_SPEED_HZ = 500`：启动频率，避免新机构一启动就冲击过大。
+- `TRACK_MAX_SPEED_HZ = 1800`：驱动层速度上限。
+
+原来电机不转的直接原因是目标最大值只有30步，而停止窗口仍为160步，所有目标都会被判定为
+“已经到位”；同时固定速度和驱动最大速度被调成90 Hz，响应也会非常慢。
+
+新结构建议按以下顺序调节：
+
+1. 先确认安全行程：让 `BALANCE_TARGET_LIMIT_STEPS` 保持小于 `TRACK_POSITION_LIMIT`，不要同时随意增大。
+2. 电机仍不动作：先检查有效坐标和使能，再把 `BALANCE_MOTOR_STOP_WINDOW_STEPS` 从5减到3，不要先增大全部增益。
+3. 电机会动但倾角不足：中心模式增大 `BALANCE_ACCEL_STEP_KP`；去+5增大 `MODE3_PLUS_DRIVE_MIN_TARGET_STEPS`。
+4. 加速过猛：减小 `BALANCE_ACCEL_STEP_KP`，或减小 `BALANCE_TARGET_LIMIT_STEPS`。
+5. 制动太晚：增大对应的 `*_BRAKE_PREDICT_TIME_S`，每次增加 `0.03~0.05 s`。
+6. 换向及时但刹不住：增大对应的 `*_BRAKE_STEP_KP`，再小幅增大 `*_BRAKE_MIN_TARGET_STEPS`。
+7. 目标附近抖动：减小近端最低制动步数，或把停止窗口从5增加到7~10步。
+8. 电机到位太慢：提高 `BALANCE_MOTOR_FIXED_SPEED_HZ`，但不得超过 `TRACK_MAX_SPEED_HZ`。
+9. 电机失步或机械冲击明显：降低 `TRACK_START_SPEED_HZ` 和 `BALANCE_MOTOR_FIXED_SPEED_HZ`。
+
+所有带 `STEPS` 的参数现在都以步进脉冲数为单位；如果驱动器细分发生变化，需要按细分比例一起缩放。
