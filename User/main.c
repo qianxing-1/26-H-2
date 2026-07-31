@@ -359,8 +359,9 @@ static void Balance_UpdateTargetPosition(float dt_s)
     }
 
     /* Slowly add tilt only when the ball is persistently stuck away from target. */
-    if (CurrentMode == MODE_REQUIREMENT_3 || braking ||
-        abs_error <= BALANCE_STATIC_COMP_ERROR_PIXELS)
+    if ((CurrentMode != MODE_REQUIREMENT_4_5 &&
+         CurrentMode != MODE_HOLD_INITIAL_X) ||
+        braking || abs_error <= BALANCE_STATIC_COMP_ERROR_PIXELS)
     {
         BalanceStaticCompSteps = 0.0f;
         BalanceStaticCompFrames = 0;
