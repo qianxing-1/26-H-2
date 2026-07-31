@@ -9,7 +9,7 @@
 /* 相机坐标以及±5cm任务像素标定 */
 #define BALL_CENTER_X                322        // 小球处于中心位置对应的相机X像素
 #define BALL_PLUS_5CM_X              450  // 小球向右偏移+5cm目标像素
-#define BALL_MINUS_5CM_X             180  // 小球向左偏移?5cm目标像素
+#define BALL_MINUS_5CM_X             185  // 小球向左偏移?5cm目标像素
 #define BALL_COORDINATE_MAX          640        // 相机X轴像素最大值
 
 #define CONTROL_PERIOD_MS              5        // 控制循环周期 5ms
@@ -20,47 +20,50 @@
 /* Position/velocity cascade tuning; positive target steps command CW/up. */
 #define BALANCE_POSITION_VEL_KP_FAR     6.0f
 #define BALANCE_POSITION_VEL_KP_NEAR    0.80f
-#define BALANCE_DESIRED_VELOCITY_MAX  650.0f
-#define BALANCE_ACCEL_STEP_KP            0.35f
-#define BALANCE_BRAKE_STEP_KP            0.70f
+#define BALANCE_DESIRED_VELOCITY_MAX  400.0f
+#define BALANCE_ACCEL_STEP_KP            0.2f
+#define BALANCE_BRAKE_STEP_KP            0.28f
 #define BALANCE_BRAKE_PREDICT_TIME_S     0.30f
-#define BALANCE_BRAKE_MIN_VELOCITY      80.0f
-#define BALANCE_BRAKE_RELEASE_VELOCITY  50.0f
-#define BALANCE_BRAKE_HOLD_FRAMES           2
-#define BALANCE_BRAKE_MIN_TARGET_STEPS  35.0f
+#define BALANCE_BRAKE_MIN_VELOCITY      110.0f
+#define BALANCE_BRAKE_RELEASE_VELOCITY  70.0f
+#define BALANCE_BRAKE_HOLD_FRAMES           1
+#define BALANCE_BRAKE_MIN_TARGET_STEPS   8.0f
 #define BALANCE_BRAKE_TARGET_ALPHA       1.00f
-#define BALANCE_POSITION_INTEGRAL_KI     0.06f
+/* Integral gain is independent so mode 3 can disable it near -5. */
+#define BALANCE_POSITION_INTEGRAL_KI     0.2f
+#define MODE3_POSITION_INTEGRAL_KI       0.0f
 #define BALANCE_GAIN_SCHEDULE_PIXELS   240.0f
 #define BALANCE_INTEGRAL_ZONE_PIXELS    32.0f
-#define BALANCE_INTEGRAL_MAX_STEPS      16.0f
-#define BALANCE_TARGET_LIMIT_STEPS     180.0f
+#define BALANCE_INTEGRAL_MAX_STEPS      6.0f
+#define BALANCE_TARGET_LIMIT_STEPS     100.0f
 #define BALANCE_TARGET_FILTER_ALPHA      0.90f
 #define BALANCE_MOTOR_FIXED_SPEED_HZ   450.0f
-#define BALANCE_MOTOR_STOP_WINDOW_STEPS   4.0f
-#define BALANCE_CENTER_HOLD_PIXELS        6.0f
-#define BALANCE_CENTER_HOLD_VELOCITY     50.0f
+#define BALANCE_MOTOR_STOP_WINDOW_STEPS   6.0f
+#define BALANCE_CENTER_HOLD_PIXELS        8.0f
+#define BALANCE_CENTER_HOLD_VELOCITY     60.0f
 #define BALANCE_MOTOR_SIGN                1.0f
 /* Requirement 3 point-to-point tuning for the high-sensitivity linkage. */
-#define MODE3_PLUS_REACH_PIXELS                    12.0f
-#define MODE3_PLUS_BRAKE_ENABLE_PIXELS             50.0f
+#define MODE3_PLUS_REACH_PIXELS                    40.0f
+#define MODE3_PLUS_BRAKE_ENABLE_PIXELS             70.0f
 #define MODE3_PLUS_DRIVE_MIN_TARGET_STEPS          40.0f
-#define MODE3_PLUS_BRAKE_STEP_KP                     0.35f
-#define MODE3_PLUS_BRAKE_PREDICT_TIME_S              0.08f
+#define MODE3_PLUS_BRAKE_STEP_KP                     0.70f
+#define MODE3_PLUS_BRAKE_PREDICT_TIME_S              0.15f
 #define MODE3_PLUS_BRAKE_MIN_VELOCITY              110.0f
 #define MODE3_PLUS_BRAKE_RELEASE_VELOCITY           75.0f
 #define MODE3_PLUS_BRAKE_HOLD_FRAMES                    1
-#define MODE3_PLUS_BRAKE_MIN_TARGET_STEPS           22.0f
-#define MODE3_MINUS_BRAKE_STEP_KP                    0.50f
-#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.30f
-#define MODE3_MINUS_BRAKE_MIN_VELOCITY              80.0f
-#define MODE3_MINUS_BRAKE_RELEASE_VELOCITY          50.0f
-#define MODE3_MINUS_BRAKE_HOLD_FRAMES                   2
-#define MODE3_MINUS_BRAKE_MIN_TARGET_STEPS          38.0f
-#define MODE3_MINUS_BRAKE_TAPER_PIXELS              45.0f
-#define MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS     12.0f
+#define MODE3_PLUS_BRAKE_MIN_TARGET_STEPS           32.0f
+#define MODE3_MINUS_BRAKE_STEP_KP                    0.24f
+#define MODE3_MINUS_BRAKE_PREDICT_TIME_S             0.46f
+#define MODE3_MINUS_BRAKE_MIN_VELOCITY              150.0f
+#define MODE3_MINUS_BRAKE_RELEASE_VELOCITY          120.0f
+#define MODE3_MINUS_BRAKE_HOLD_FRAMES                   0
+#define MODE3_MINUS_BRAKE_MIN_TARGET_STEPS          16.0f
+#define MODE3_MINUS_BRAKE_TAPER_PIXELS              120.0f
+#define MODE3_MINUS_BRAKE_MIN_TARGET_NEAR_STEPS     7.0f
 #define MODE3_FINAL_ERROR_PIXELS                     8.0f
 #define MODE3_FINAL_VELOCITY                        35.0f
 #define MODE3_FINAL_STABLE_FRAMES                       8
+
 /* STM32端滤波，抑制相机单像素抖动；大小跳变使用不同滤波系数 */
 #define POSITION_FILTER_ALPHA_NEAR    0.48f    // 小球位置变化小时，滤波系数，数值越小滤波越强
 #define POSITION_FILTER_ALPHA_FAR     0.78f    // 小球位置变化大时，滤波系数，响应更快
@@ -227,6 +230,9 @@ static void Balance_UpdateTargetPosition(float dt_s)
     float brake_min_target_steps;
     uint8_t brake_hold_frames;
     float alpha = BALANCE_TARGET_FILTER_ALPHA;
+    float position_integral_ki =
+        (CurrentMode == MODE_REQUIREMENT_3) ?
+        MODE3_POSITION_INTEGRAL_KI : BALANCE_POSITION_INTEGRAL_KI;
     uint8_t brake_request;
     uint8_t braking = 0;
     int8_t motion_direction = 0;
@@ -338,7 +344,7 @@ static void Balance_UpdateTargetPosition(float dt_s)
     if (abs_error <= BALANCE_INTEGRAL_ZONE_PIXELS)
     {
         BalanceIntegralSteps +=
-            BALANCE_POSITION_INTEGRAL_KI * BalanceErrorX * dt_s;
+            position_integral_ki * BalanceErrorX * dt_s;
         BalanceIntegralSteps = ClampFloat(BalanceIntegralSteps,
                                           -BALANCE_INTEGRAL_MAX_STEPS,
                                           BALANCE_INTEGRAL_MAX_STEPS);
