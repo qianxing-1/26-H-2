@@ -16,7 +16,7 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 
 按下开始键后不检查小球是否位于中心，第一目标固定为 `BALL_PLUS_5CM_X`。
 小球进入 +5 判定窗口，或向右运动时高速跨过整个窗口后，立即把目标切换为 `BALL_MINUS_5CM_X`，
-两个阶段使用不同的模式3制动参数；加速、位置和速度环参数暂时仍与模式2共用。
+两个阶段使用模式3原有的位置-速度串级控制，与模式2的车载中心控制相互独立。
 
 - `MODE3_PLUS_REACH_PIXELS`：+5 cm 的到达窗口；向右高速跨过整个窗口也会切换，避免漏判。
 - `MODE3_PLUS_BRAKE_ENABLE_PIXELS`：去 +5 时只在距离目标小于该值后允许反向制动，防止半路停下。
@@ -42,7 +42,7 @@ TIM1_CH4 在 PA11 输出步进脉冲，并通过 PA10/PA12 控制 DIR/ENA。
 
 ## 位置-速度串级平衡
 
-模式1的两个移动阶段、最终 -5 cm 保持阶段以及模式2都使用同一套位置-速度串级反馈。定义：
+模式1的两个移动阶段及最终 -5 cm 保持阶段使用位置-速度串级反馈。定义：
 
 ```text
 e = 小球坐标 - 目标坐标
@@ -64,7 +64,7 @@ v_error = v_ref - 小球实测速度
 
 ## 串级控制调参
 
-建议先把 `BALANCE_POSITION_INTEGRAL_KI` 临时设为0，调好位置/速度反馈后再加积分：
+以下参数属于模式1；建议先把 `BALANCE_POSITION_INTEGRAL_KI` 临时设为0，调好位置/速度反馈后再加积分：
 
 - `BALANCE_MOTOR_SIGN`：方向不符时只把 `1.0f` 改为 `-1.0f`。
 - `BALANCE_POSITION_VEL_KP_FAR`：远离目标时允许的回中心速度斜率；增大后加速更积极、制动更晚。
@@ -86,5 +86,36 @@ v_error = v_ref - 小球实测速度
 减小近端 `Kpos` 或增大预测时间；电机反向了但制动力不足，优先增大 `BRAKE_STEP_KP` 或最小制动步数；
 中心附近快速抖动则提高制动速度阈值、增加保持帧数、增大停止窗口或加强速度滤波。
 
-`BALANCE_BRAKE_*` 参数只用于模式2；模式3分别使用 `MODE3_PLUS_BRAKE_*` 和
-`MODE3_MINUS_BRAKE_*`，两段行程可以独立调节。
+`BALANCE_BRAKE_*`、`MODE3_PLUS_BRAKE_*` 和 `MODE3_MINUS_BRAKE_*` 只用于模式1，
+不会影响下面的车载中心模式。
+
+## 车载中心模式
+
+模式2针对循迹小车启动、直线加减速、半圆转弯和车身摇摆产生的短时惯性扰动，
+使用独立的 `Center_UpdateTargetPosition()`。模式3的点对点控制函数和状态机不参与该控制。
+
+中心模式把位置和速度直接组合成电机目标倾角：
+
+```text
+预测误差 = 位置误差 + 小球速度 * CENTER_PREDICT_TIME_S
+目标步数 = CENTER_POSITION_STEP_KP * 预测误差
+         + CENTER_VELOCITY_STEP_KD * 小球速度
+         + 静态零位积分补偿
+```
+
+速度项会在小球位移还很小时立即产生与运动方向相反的管道倾角；位置项负责随后回中。
+中心模式还单独使用更快的视觉滤波和更小的电机停止窗口，避免小扰动计算出的目标步数被忽略。
+
+建议按以下顺序现场调节：
+
+1. 小车一启动，小球刚移动但电机反应仍慢：增大 `CENTER_VELOCITY_STEP_KD`，每次增加 `0.5`；或增大 `CENTER_VELOCITY_FILTER_ALPHA`。
+2. 小球位移不大时电机仍不动作：减小 `CENTER_MOTOR_STOP_WINDOW_STEPS`，建议每次减小 `10 steps`；或减小 `CENTER_MIN_RESPONSE_VELOCITY`。
+3. 电机动作及时但抵消惯性不够：增大 `CENTER_MIN_RESPONSE_STEPS`，每次增加 `40~80 steps`。
+4. 小球已经偏离中心，回中力度不足：增大 `CENTER_POSITION_STEP_KP`，每次增加 `1~2`。
+5. 小球还没明显偏离就需要更早预判：增大 `CENTER_PREDICT_TIME_S`，每次增加 `0.02 s`。
+6. 小车摇摆时电机高频抖动：先增大 `CENTER_VELOCITY_DEADBAND`，再增大 `CENTER_POSITION_DEADBAND_PIXELS`；不要先降低响应增益。
+7. 中心附近持续补脉冲：增大 `CENTER_MOTOR_STOP_WINDOW_STEPS` 或 `CENTER_HOLD_PIXELS`。
+8. 最后长期停在中心一侧：其他动态参数稳定后，小幅增加 `CENTER_POSITION_INTEGRAL_KI`。
+
+模式2的滤波参数为 `CENTER_POSITION_FILTER_*`、`CENTER_VELOCITY_FILTER_ALPHA` 和
+`CENTER_CAMERA_VELOCITY_WEIGHT`。这些参数只影响中心模式，不改变模式3的视觉滤波。
