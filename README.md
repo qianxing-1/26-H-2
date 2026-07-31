@@ -59,8 +59,8 @@ v_error = v_ref - 小球实测速度
 每次过中心后的误差和速度都会继续进入同一关系，逐次减小振幅，最后进入中心保持区。
 
 电机使用固定高速追踪目标步数，普通目标变化经过轻微滤波；目标步数一旦反号，
-滤波会被旁路以保证制动换向及时。制动阶段使用独立的较大增益和最小制动倾角，并保持若干视觉帧，
-避免速度噪声使控制器在加速、制动之间高速切换。积分只在中心附近启用，用于补偿管道零位和摩擦造成的静态偏差。
+滤波会被旁路以保证制动换向及时。中心模式采用与模式3去 -5 相同的控制结构：速度预测提前制动、
+制动状态滞回保持，并在接近中心时渐变减小最低强制动倾角。积分只在中心附近启用，用于补偿管道零位和摩擦造成的静态偏差。
 
 ## 串级控制调参
 
@@ -72,8 +72,10 @@ v_error = v_ref - 小球实测速度
 - `BALANCE_ACCEL_STEP_KP`：加速阶段速度误差对应的倾角；只影响正常回中力度。
 - `BALANCE_BRAKE_STEP_KP`：制动阶段独立增益；增大后反向制动力更强，不会同时放大初始加速。
 - `BALANCE_BRAKE_PREDICT_TIME_S`：速度前视时间；增大会更早制动，建议以 `0.05 s` 为步长调整。
-- `BALANCE_BRAKE_MIN_TARGET_STEPS`：高速制动时的最小反向倾角，防止速度误差刚过阈值时制动力太弱。
-- `BALANCE_BRAKE_HOLD_FRAMES`：制动状态保持帧数；50 FPS下4帧约80 ms，用于抑制增益切换抖动。
+- `BALANCE_BRAKE_MIN_TARGET_STEPS`：远离中心时高速制动的最低反向倾角。
+- `BALANCE_BRAKE_TAPER_PIXELS`：进入该中心范围后，最低强制动倾角开始随距离渐变减小。
+- `BALANCE_BRAKE_MIN_TARGET_NEAR_STEPS`：中心附近的最低强制动倾角；减小可降低抖动，过小可能刹不住。
+- `BALANCE_BRAKE_HOLD_FRAMES`：制动状态保持帧数；50 FPS下2帧约40 ms，用于抑制增益切换抖动。
 - `BALANCE_BRAKE_MIN_VELOCITY`、`BALANCE_BRAKE_RELEASE_VELOCITY`：进入和退出强制动的速度滞回阈值。
 - `BALANCE_DESIRED_VELOCITY_MAX`：期望速度上限；过冲严重时先降低，响应不足时再提高。
 - `BALANCE_TARGET_LIMIT_STEPS`：最大倾斜步数，限制最强加速和制动角度。
