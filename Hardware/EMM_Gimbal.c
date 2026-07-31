@@ -78,9 +78,9 @@ void EMM_Set_Direction(EMM_Motor *motor, uint8_t dir)
 {
     motor->Direction = dir;
     if (dir == MOTOR_DIR_CCW_DOWN)
-        GPIO_SetBits(motor->DIR_Port, motor->DIR_Pin);
-    else
         GPIO_ResetBits(motor->DIR_Port, motor->DIR_Pin);
+    else
+        GPIO_SetBits(motor->DIR_Port, motor->DIR_Pin);
 }
 
 void EMM_Apply_Speed(EMM_Motor *motor, float signed_frequency, float dt_s)
