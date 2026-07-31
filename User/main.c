@@ -41,6 +41,13 @@
 #define BALANCE_MOTOR_STOP_WINDOW_STEPS   6.0f
 #define BALANCE_CENTER_HOLD_PIXELS        8.0f
 #define BALANCE_CENTER_HOLD_VELOCITY     60.0f
+/* Static-friction compensation for center and first-X hold modes only. */
+#define BALANCE_STATIC_COMP_ERROR_PIXELS           12.0f
+#define BALANCE_STATIC_COMP_MAX_VELOCITY           30.0f
+#define BALANCE_STATIC_COMP_DELAY_FRAMES               6
+#define BALANCE_STATIC_COMP_RAMP_STEPS_PER_S       24.0f
+#define BALANCE_STATIC_COMP_RELEASE_STEPS_PER_S   120.0f
+#define BALANCE_STATIC_COMP_MAX_STEPS              12.0f
 #define BALANCE_MOTOR_SIGN                1.0f
 /* Requirement 3 point-to-point tuning for the high-sensitivity linkage. */
 #define MODE3_PLUS_REACH_PIXELS                    40.0f
@@ -100,6 +107,9 @@ static volatile float BalanceErrorX = 0.0f;                   // Œª÷√ŒÛ≤Ó=¬À≤®–°
 static volatile float BalanceSpeedCommand = 0.0f;              // Final signed motor frequency command in Hz
 static volatile float BalanceTargetSteps = 0.0f;
 static volatile float BalanceIntegralSteps = 0.0f;
+static volatile float BalanceStaticCompSteps = 0.0f;
+static volatile uint8_t BalanceStaticCompFrames = 0;
+static volatile int8_t BalanceStaticCompDirection = 0;
 static volatile uint8_t BalanceBrakeHoldFrames = 0;
 static volatile int8_t BalanceBrakeDirection = 0;
 static volatile uint32_t Mode3CompleteMs = 0;
@@ -168,6 +178,9 @@ static void Balance_ResetEstimator(void)
     BalanceSpeedCommand = 0.0f;
     BalanceTargetSteps = 0.0f;
     BalanceIntegralSteps = 0.0f;
+    BalanceStaticCompSteps = 0.0f;
+    BalanceStaticCompFrames = 0;
+    BalanceStaticCompDirection = 0;
     BalanceBrakeHoldFrames = 0;
     BalanceBrakeDirection = 0;
 }
@@ -345,6 +358,62 @@ static void Balance_UpdateTargetPosition(float dt_s)
         BalanceBrakeDirection = 0;
     }
 
+    /* Slowly add tilt only when the ball is persistently stuck away from target. */
+    if (CurrentMode == MODE_REQUIREMENT_3 || braking ||
+        abs_error <= BALANCE_STATIC_COMP_ERROR_PIXELS)
+    {
+        BalanceStaticCompSteps = 0.0f;
+        BalanceStaticCompFrames = 0;
+        BalanceStaticCompDirection = 0;
+    }
+    else if (AbsFloat(BallVelocityX) <= BALANCE_STATIC_COMP_MAX_VELOCITY)
+    {
+        int8_t error_direction = (BalanceErrorX > 0.0f) ? 1 : -1;
+
+        if (BalanceStaticCompDirection != 0 &&
+            BalanceStaticCompDirection != error_direction)
+        {
+            BalanceStaticCompSteps = 0.0f;
+            BalanceStaticCompFrames = 0;
+        }
+        BalanceStaticCompDirection = error_direction;
+
+        if (BalanceStaticCompFrames < BALANCE_STATIC_COMP_DELAY_FRAMES)
+        {
+            BalanceStaticCompFrames++;
+        }
+        else
+        {
+            BalanceStaticCompSteps +=
+                (float)error_direction *
+                BALANCE_STATIC_COMP_RAMP_STEPS_PER_S * dt_s;
+            BalanceStaticCompSteps = ClampFloat(
+                BalanceStaticCompSteps,
+                -BALANCE_STATIC_COMP_MAX_STEPS,
+                BALANCE_STATIC_COMP_MAX_STEPS);
+        }
+    }
+    else
+    {
+        float release_steps =
+            BALANCE_STATIC_COMP_RELEASE_STEPS_PER_S * dt_s;
+
+        BalanceStaticCompFrames = 0;
+        if (AbsFloat(BalanceStaticCompSteps) <= release_steps)
+        {
+            BalanceStaticCompSteps = 0.0f;
+            BalanceStaticCompDirection = 0;
+        }
+        else if (BalanceStaticCompSteps > 0.0f)
+        {
+            BalanceStaticCompSteps -= release_steps;
+        }
+        else
+        {
+            BalanceStaticCompSteps += release_steps;
+        }
+    }
+
     step_gain = braking ? brake_step_kp :
                            BALANCE_ACCEL_STEP_KP;
 
@@ -374,7 +443,8 @@ static void Balance_UpdateTargetPosition(float dt_s)
         if (braking && control_effort * (float)BalanceBrakeDirection <= 0.0f)
             control_effort = (float)BalanceBrakeDirection *
                              AbsFloat(control_effort);
-        raw_target = step_gain * control_effort + BalanceIntegralSteps;
+        raw_target = step_gain * control_effort + BalanceIntegralSteps +
+                     BalanceStaticCompSteps;
 
         if (braking &&
             AbsFloat(raw_target) < brake_min_target_steps)

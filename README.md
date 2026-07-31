@@ -90,6 +90,19 @@ v_error = v_ref - 小球实测速度
 `BALANCE_BRAKE_*` 参数只用于模式2；模式3分别使用 `MODE3_PLUS_BRAKE_*` 和
 `MODE3_MINUS_BRAKE_*`，两段行程可以独立调节。
 
+## 静止偏差补偿
+
+固定中心模式和首次坐标保持模式加入静摩擦补偿，正负5 cm模式不使用。小球持续静止在目标外时，控制器缓慢增加同方向倾角；小球开始运动、进入制动或回到目标死区后，补偿快速撤销。
+
+- `BALANCE_STATIC_COMP_ERROR_PIXELS`：允许补偿的最小位置误差。
+- `BALANCE_STATIC_COMP_MAX_VELOCITY`：判断小球静止的最大速度。
+- `BALANCE_STATIC_COMP_DELAY_FRAMES`：连续静止多少视觉帧后开始补偿。
+- `BALANCE_STATIC_COMP_RAMP_STEPS_PER_S`：补偿倾角增长速度。
+- `BALANCE_STATIC_COMP_RELEASE_STEPS_PER_S`：小球开始运动后的撤销速度。
+- `BALANCE_STATIC_COMP_MAX_STEPS`：补偿允许增加的最大脉冲数。
+
+如果小球仍停在目标外，先增大最大补偿，再小幅提高增长速度；如果补偿启动后冲击过大，则反向调整。中心附近出现新的低频摆动时，应增大误差阈值或减小最大补偿，不要先降低电机追踪速度。
+
 ## 高灵敏机械结构
 
 当前机构不到四分之一圈即可获得足够的加速和制动力。按1.8度步进电机、8细分估算，
